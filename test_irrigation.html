@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgriScan — Test irrigation (FAO-56)</title>
+<style>
+  * { box-sizing:border-box; }
+  body { font-family: system-ui, sans-serif; background:#f5f3ee; color:#161512; padding:24px; max-width:780px; margin:auto; }
+  h1 { color:#0f6e56; font-size:20px; margin-bottom:4px; }
+  p.sous { color:#888; font-size:13px; margin-bottom:20px; }
+  fieldset { border:1px solid #ccc; border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  legend { font-weight:700; color:#0f6e56; padding:0 6px; }
+  label { font-size:13px; font-weight:600; color:#555; }
+  input, select { padding:8px; border:1px solid #ccc; border-radius:8px; font-size:13px; }
+  input[type=number]{ width:110px; }
+  .ligne { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .btn { background:#0f6e56; color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; font-size:14px; }
+  .btn:disabled{ opacity:.5; cursor:wait; }
+  .cartes { display:flex; gap:14px; flex-wrap:wrap; margin:14px 0; }
+  .carte { flex:1; min-width:130px; background:#fff; border:1px solid #ddd; border-radius:12px; padding:14px; text-align:center; }
+  .carte .v { font-size:22px; font-weight:800; color:#0f6e56; }
+  .carte .l { font-size:12px; color:#888; margin-top:4px; }
+  .carte.principal .v { color:#0a4e3d; font-size:26px; }
+  pre { background:#141d1a; color:#c8f2e0; padding:14px; border-radius:10px; font-size:12px; overflow:auto; }
+  .msg { font-size:13px; margin:8px 0; }
+  .msg.err { color:#b23b2e; } .msg.ok { color:#0f6e56; }
+  .info { background:#eaf5f1; border:1px solid #cfe7de; color:#0a4e3d; font-size:12.5px; padding:10px 12px; border-radius:8px; margin-top:10px; }
+</style>
+</head>
+<body>
+  <h1>💧 AgriScan — Test irrigation (FAO-56)</h1>
+  <p class="sous">Vérifie les chiffres du besoin en eau (Penman-Monteith + Kc − pluie efficace) avant intégration dans l'interface.</p>
+
+  <fieldset>
+    <legend>Paramètres</legend>
+    <div class="ligne">
+      <div>
+        <label>Culture</label><br>
+        <select id="culture">
+          <option value="tomate">Tomate</option>
+          <option value="concombre">Concombre</option>
+          <option value="piment">Piment</option>
+          <option value="laitue">Laitue</option>
+        </select>
+      </div>
+      <div><label>Date de semis</label><br><input type="date" id="dateSemis" value="2024-09-01"></div>
+      <div><label>Date de fin d'analyse</label><br><input type="date" id="dateFin" value="2024-12-15"></div>
+    </div>
+    <div class="ligne">
+      <div><label>Ouest</label><br><input id="ouest" type="number" step="0.001" value="-5.945"></div>
+      <div><label>Sud</label><br><input id="sud" type="number" step="0.001" value="6.835"></div>
+      <div><label>Est</label><br><input id="est" type="number" step="0.001" value="-5.895"></div>
+      <div><label>Nord</label><br><input id="nord" type="number" step="0.001" value="6.875"></div>
+    </div>
+    <button class="btn" id="btn" onclick="tester()">Calculer le besoin en eau</button>
+  </fieldset>
+
+  <div id="msg" class="msg"></div>
+
+  <div class="cartes" id="cartes" style="display:none;">
+    <div class="carte principal"><div class="v" id="vBesoin">—</div><div class="l">Besoin irrigation (mm/j)</div></div>
+    <div class="carte"><div class="v" id="vEt0">—</div><div class="l">ET₀ (mm/j)</div></div>
+    <div class="carte"><div class="v" id="vEtc">—</div><div class="l">ETc (mm/j)</div></div>
+    <div class="carte"><div class="v" id="vKc">—</div><div class="l">Kc</div></div>
+    <div class="carte"><div class="v" id="vPluie">—</div><div class="l">Pluie efficace (mm/j)</div></div>
+  </div>
+
+  <div class="info" id="infoStade" style="display:none;"></div>
+
+  <h3 style="margin-top:18px; font-size:14px; color:#555;">Réponse brute (JSON) :</h3>
+  <pre id="brut">—</pre>
+
+<script>
+  async function tester(){
+    const btn = document.getElementById('btn');
+    const msg = document.getElementById('msg');
+    btn.disabled = true;
+    msg.className = 'msg'; msg.textContent = '⏳ Calcul en cours… (ERA5 + CHIRPS, ~15-40 s)';
+
+    const corps = {
+      bbox: [parseFloat(ouest.value), parseFloat(sud.value), parseFloat(est.value), parseFloat(nord.value)],
+      culture: document.getElementById('culture').value,
+      date_semis: document.getElementById('dateSemis').value,
+      date_fin: document.getElementById('dateFin').value
+    };
+
+    try {
+      const rep = await fetch('http://127.0.0.1:5000/irrigation', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(corps)
+      });
+      const data = await rep.json();
+      document.getElementById('brut').textContent = JSON.stringify(data, null, 2);
+
+      if (data.erreur) { msg.className='msg err'; msg.textContent='❌ '+data.erreur; btn.disabled=false; return; }
+
+      document.getElementById('cartes').style.display='flex';
+      document.getElementById('vBesoin').textContent = data.besoin_irrigation_mm_j;
+      document.getElementById('vEt0').textContent = data.et0_mm_j;
+      document.getElementById('vEtc').textContent = data.etc_mm_j;
+      document.getElementById('vKc').textContent = data.kc;
+      document.getElementById('vPluie').textContent = data.pluie_efficace_mm_j;
+
+      const info = document.getElementById('infoStade');
+      info.style.display='block';
+      info.textContent = 'Culture : '+data.culture+' · Stade : '+data.stade
+        +' · '+data.jours_depuis_semis+' jours depuis le semis · Kc appliqué : '+data.kc;
+
+      msg.className='msg ok'; msg.textContent='✓ Calcul terminé.';
+    } catch(e) {
+      msg.className='msg err';
+      msg.textContent="❌ Impossible de joindre la passerelle (py passerelle.py).";
+    }
+    btn.disabled=false;
+  }
+</script>
+</body>
+</html>

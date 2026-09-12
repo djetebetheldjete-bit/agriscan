@@ -156,6 +156,21 @@
         <button class="btn clair ligne2" id="btnAnomalie" onclick="analyserAnomalie()">Détecter les changements</button>
         <button class="btn clair ligne2" onclick="effacerZone()">Effacer la zone</button>
       </div>
+
+      <div class="groupe">
+        <div class="titre">Irrigation (besoin en eau)</div>
+        <label>Culture</label>
+        <select id="culture">
+          <option value="tomate">Tomate</option>
+          <option value="concombre">Concombre</option>
+          <option value="piment">Piment</option>
+          <option value="laitue">Laitue</option>
+        </select>
+        <label style="margin-top:8px;">Date de semis</label>
+        <input type="date" id="dateSemis" value="2024-09-01">
+        <button class="btn ligne2" id="btnIrrigation" onclick="analyserIrrigation()">Calculer le besoin en eau</button>
+        <div class="astuce">Méthode FAO-56 (Penman-Monteith + coefficient cultural), pluie CHIRPS.</div>
+      </div>
     </aside>
 
     <!-- CONTENU / RESULTATS -->
@@ -168,6 +183,7 @@
           <div class="onglets">
             <button class="onglet actif" id="ongletNdvi" onclick="basculerCarte('ndvi')">Santé (NDVI)</button>
             <button class="onglet" id="ongletAno" onclick="basculerCarte('anomalie')">Changements</button>
+            <button class="onglet" id="ongletEau" onclick="basculerCarte('eau')">Besoin en eau</button>
           </div>
           <div class="legende" id="legendeCarte">
             <span>Sol nu</span><div class="barre-leg barre-ndvi"></div><span>Végétation dense</span>
@@ -218,6 +234,28 @@
         </div>
       </div>
 
+      <!-- Irrigation -->
+      <div id="blocIrrigation" style="display:none; margin-top:16px;">
+        <div class="panel">
+          <div class="ligne-titre">
+            <div>
+              <h3>💧 Besoin en eau d'irrigation</h3>
+              <div class="sous" id="sousIrrigation">Méthode FAO-56</div>
+            </div>
+          </div>
+          <div class="stats" style="margin-bottom:0;">
+            <div class="stat principale"><div class="v num" id="iBesoin">—</div><div class="l">Besoin (mm/jour)</div></div>
+            <div class="stat"><div class="v num" id="iEt0">—</div><div class="l">ET₀ référence</div></div>
+            <div class="stat"><div class="v num" id="iEtc">—</div><div class="l">ETc (culture)</div></div>
+            <div class="stat"><div class="v num" id="iKc">—</div><div class="l">Coefficient Kc</div></div>
+            <div class="stat s-sain"><div class="barre-etat"></div><div class="v num" id="iPluie">—</div><div class="l">Pluie efficace</div></div>
+          </div>
+          <div class="alerte vert" id="alerteIrrigation" style="display:flex; margin-top:14px;">
+            <span class="ico">💧</span><span id="alerteIrrigationTxt"></span>
+          </div>
+        </div>
+      </div>
+
       <div class="vide" id="etatVide">Délimite une parcelle sur la carte, puis lance une analyse. Les indicateurs et graphiques s'afficheront ici.</div>
     </main>
   </div>
@@ -229,7 +267,7 @@
   const map = L.map('map').setView([4.76, -6.70], 12);
   const fondOSM = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
-  let coucheNdvi=null, coucheAno=null, coucheZone=null, zoneActive=null, marqueurLieu=null;
+  let coucheNdvi=null, coucheAno=null, coucheEau=null, coucheZone=null, zoneActive=null, marqueurLieu=null;
   let modeCarte='ndvi', granularite='mois';
   let chartEvolution=null, chartDonut=null, chartBarres=null;
   let derniereZonePourEvolution=null;
@@ -328,8 +366,10 @@
     groupeDessin.clearLayers(); coucheZone=null; zoneActive=null;
     if(coucheNdvi){map.removeLayer(coucheNdvi); coucheNdvi=null;}
     if(coucheAno){map.removeLayer(coucheAno); coucheAno=null;}
+    if(coucheEau){map.removeLayer(coucheEau); coucheEau=null;}
     document.getElementById('blocStats').style.display='none';
     document.getElementById('blocGraphs').style.display='none';
+    document.getElementById('blocIrrigation').style.display='none';
     document.getElementById('alerte').style.display='none';
     document.getElementById('etatVide').style.display='block';
     document.getElementById('enteteParcelle').innerHTML='<b>Aucune parcelle</b><span>Délimite une zone pour commencer</span>';
@@ -487,20 +527,79 @@
     });
   }
 
+  // ===== Irrigation (besoin en eau FAO-56) =====
+  async function analyserIrrigation(){
+    if(!zoneActive){ afficherMsg('Délimite ou importe d\'abord une zone.','err'); return; }
+    const btn=document.getElementById('btnIrrigation'); btn.disabled=true;
+    afficherMsg('Calcul du besoin en eau (ERA5 + CHIRPS)… 15-40 s.','info');
+    try{
+      const corps=Object.assign(corpsRequete(), {
+        culture: document.getElementById('culture').value,
+        date_semis: document.getElementById('dateSemis').value
+      });
+      const rep=await fetch(API+'/irrigation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corps)});
+      const data=await rep.json();
+      if(data.erreur){ afficherMsg('Erreur : '+data.erreur,'err'); btn.disabled=false; return; }
+
+      document.getElementById('etatVide').style.display='none';
+      document.getElementById('blocIrrigation').style.display='block';
+      document.getElementById('iBesoin').textContent=data.besoin_irrigation_mm_j;
+      document.getElementById('iEt0').textContent=data.et0_mm_j;
+      document.getElementById('iEtc').textContent=data.etc_mm_j;
+      document.getElementById('iKc').textContent=data.kc;
+      document.getElementById('iPluie').textContent=data.pluie_efficace_mm_j;
+      document.getElementById('sousIrrigation').textContent=
+        'Culture : '+data.culture+' · Stade : '+data.stade+' · '+data.jours_depuis_semis+' jours depuis le semis';
+
+      // Message : conversion mm/j -> litres/ha/j (1 mm = 10 000 L/ha)
+      const litres = Math.round(data.besoin_irrigation_mm_j * 10000);
+      const a=document.getElementById('alerteIrrigation'), t=document.getElementById('alerteIrrigationTxt');
+      if(data.besoin_irrigation_mm_j<=0){
+        a.className='alerte vert'; a.style.display='flex';
+        t.textContent='La pluie couvre les besoins actuels : aucune irrigation nécessaire sur cette période.';
+      } else {
+        a.className='alerte orange'; a.style.display='flex';
+        t.textContent='Apport conseillé : environ '+data.besoin_irrigation_mm_j+' mm/jour, soit ~'
+          + litres.toLocaleString('fr-FR') + ' litres par hectare et par jour, à compléter par irrigation.';
+      }
+      afficherMsg('Besoin en eau calculé.','ok');
+
+      // Carte spatialisee du besoin en eau (Kc derive du NDVI)
+      try{
+        const repC=await fetch(API+'/irrigation_carte',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corpsRequete())});
+        const dataC=await repC.json();
+        if(!dataC.erreur && dataC.tile_url){
+          if(coucheEau) map.removeLayer(coucheEau);
+          coucheEau=L.tileLayer(dataC.tile_url,{opacity:0.85});
+          basculerCarte('eau');  // affiche directement la carte de besoin en eau
+        }
+      }catch(e){ /* la carte est un bonus : on ignore si elle echoue */ }
+    }catch(e){ afficherMsg('Impossible de joindre la passerelle.','err'); }
+    btn.disabled=false;
+  }
+
   // ===== Bascule de carte =====
   function basculerCarte(mode){
     modeCarte=mode;
     document.getElementById('ongletNdvi').classList.toggle('actif', mode==='ndvi');
     document.getElementById('ongletAno').classList.toggle('actif', mode==='anomalie');
+    document.getElementById('ongletEau').classList.toggle('actif', mode==='eau');
     const leg=document.getElementById('legendeCarte');
+
+    // On retire toutes les couches, puis on ajoute celle du mode choisi
+    if(coucheNdvi) map.removeLayer(coucheNdvi);
+    if(coucheAno) map.removeLayer(coucheAno);
+    if(coucheEau) map.removeLayer(coucheEau);
+
     if(mode==='ndvi'){
-      if(coucheAno) map.removeLayer(coucheAno);
       if(coucheNdvi) coucheNdvi.addTo(map);
       leg.innerHTML='<span>Sol nu</span><div class="barre-leg barre-ndvi"></div><span>Végétation dense</span>';
-    }else{
-      if(coucheNdvi) map.removeLayer(coucheNdvi);
+    } else if(mode==='anomalie'){
       if(coucheAno) coucheAno.addTo(map);
       leg.innerHTML='<span>Dégradation</span><div class="barre-leg barre-ano"></div><span>Amélioration</span>';
+    } else if(mode==='eau'){
+      if(coucheEau) coucheEau.addTo(map);
+      leg.innerHTML='<span>Besoin faible</span><div class="barre-leg" style="background:linear-gradient(90deg,#f7fbff,#c6dbef,#6baed6,#2171b5,#08306b)"></div><span>Besoin élevé</span>';
     }
   }
 </script>

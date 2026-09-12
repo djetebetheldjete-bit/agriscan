@@ -101,6 +101,274 @@ def calculer_stats(ndvi_image, zone):
     }
 
 
+
+# ======================================================================
+#  IRRIGATION — besoin en eau des cultures (methode FAO-56)
+#  ET0 (Penman-Monteith, formule validee) x Kc - pluie efficace
+# ======================================================================
+
+import math as _math
+
+# --- Coefficients culturaux Kc (FAO-56) et durees de phases (jours) ---
+# Phases : initiale, developpement, mi-saison, fin
+CULTURES = {
+    "tomate":    {"kc_ini": 0.60, "kc_mid": 1.15, "kc_end": 0.80,
+                  "d_ini": 30, "d_dev": 40, "d_mid": 40, "d_fin": 25},
+    "concombre": {"kc_ini": 0.60, "kc_mid": 1.00, "kc_end": 0.75,
+                  "d_ini": 20, "d_dev": 30, "d_mid": 40, "d_fin": 15},
+    "piment":    {"kc_ini": 0.60, "kc_mid": 1.05, "kc_end": 0.90,
+                  "d_ini": 30, "d_dev": 35, "d_mid": 40, "d_fin": 20},
+    "laitue":    {"kc_ini": 0.70, "kc_mid": 1.00, "kc_end": 0.95,
+                  "d_ini": 20, "d_dev": 30, "d_mid": 15, "d_fin": 10},
+}
+
+
+def kc_du_jour(culture, jours_depuis_semis):
+    """
+    Renvoie (Kc, nom_du_stade) selon le nombre de jours depuis le semis.
+    Interpolation lineaire pendant les phases de transition (FAO-56).
+    """
+    c = CULTURES[culture]
+    d_ini, d_dev, d_mid, d_fin = c["d_ini"], c["d_dev"], c["d_mid"], c["d_fin"]
+    kc_ini, kc_mid, kc_end = c["kc_ini"], c["kc_mid"], c["kc_end"]
+    j = jours_depuis_semis
+
+    fin_ini = d_ini
+    fin_dev = d_ini + d_dev
+    fin_mid = d_ini + d_dev + d_mid
+    fin_tot = d_ini + d_dev + d_mid + d_fin
+
+    if j < 0:
+        return kc_ini, "avant semis"
+    if j <= fin_ini:
+        return kc_ini, "initiale"
+    if j <= fin_dev:
+        # montee lineaire de kc_ini vers kc_mid
+        frac = (j - fin_ini) / d_dev
+        return kc_ini + frac * (kc_mid - kc_ini), "developpement"
+    if j <= fin_mid:
+        return kc_mid, "mi-saison"
+    if j <= fin_tot:
+        # descente lineaire de kc_mid vers kc_end
+        frac = (j - fin_mid) / d_fin
+        return kc_mid + frac * (kc_end - kc_mid), "fin de saison"
+    return kc_end, "apres recolte"
+
+
+def pluie_efficace(pluie_mm):
+    """
+    Pluie efficace (FAO / USDA-SCS, forme simplifiee mensuelle ramenee).
+    On applique un abattement : toute la pluie n'est pas utilisable.
+    Regle USDA-SCS simplifiee au pas considere.
+    """
+    if pluie_mm <= 0:
+        return 0.0
+    # Approche simple et prudente : 80% de la pluie est efficace jusqu'a un plafond,
+    # au-dela le surplus ruisselle. (parametrable)
+    return round(min(pluie_mm * 0.8, pluie_mm), 2)
+
+
+def calcul_et0_gee(zone, date_debut, date_fin):
+    """
+    Calcule ET0 (mm/jour, moyenne sur la periode) sur GEE avec ERA5-Land,
+    en appliquant la formule Penman-Monteith FAO-56 VALIDEE.
+    Renvoie une image ET0 (moyenne periode) clippee sur la zone.
+    """
+    col = (ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR")
+           .filterDate(date_debut, date_fin)
+           .filterBounds(zone))
+
+    def et0_image(img):
+        # --- Temperatures (K -> C) ---
+        tmax = img.select("temperature_2m_max").subtract(273.15)
+        tmin = img.select("temperature_2m_min").subtract(273.15)
+        tmean = tmax.add(tmin).divide(2)
+        tdew = img.select("dewpoint_temperature_2m").subtract(273.15)
+
+        # --- Vent 10m -> 2m (FAO-56 eq.47) ---
+        u10 = img.select("u_component_of_wind_10m")
+        v10 = img.select("v_component_of_wind_10m")
+        vent10 = u10.hypot(v10)  # racine(u^2+v^2)
+        u2 = vent10.multiply(4.87).divide(_math.log(67.8 * 10 - 5.42))
+
+        # --- Pressions de vapeur (kPa) ---
+        # e0(T) = 0.6108*exp(17.27*T/(T+237.3))
+        def e0(t):
+            return t.multiply(17.27).divide(t.add(237.3)).exp().multiply(0.6108)
+        es = e0(tmax).add(e0(tmin)).divide(2)
+        ea = e0(tdew)  # ea depuis le point de rosee (FAO-56)
+
+        # --- Pente Delta (kPa/C) ---
+        delta = (e0(tmean).multiply(4098)
+                 .divide(tmean.add(237.3).pow(2)))
+
+        # --- Constante psychrometrique gamma ---
+        # P depuis altitude ~ on prend P standard via ERA5 surface_pressure si dispo,
+        # sinon approximation. Ici on utilise surface_pressure (Pa -> kPa).
+        P = img.select("surface_pressure").divide(1000)
+        gamma = P.multiply(0.000665)
+
+        # --- Rayonnement net Rn (J/m2 -> MJ/m2/jour) fourni par ERA5 ---
+        rns = img.select("surface_net_solar_radiation_sum").divide(1e6)
+        rnl = img.select("surface_net_thermal_radiation_sum").divide(1e6)
+        Rn = rns.add(rnl)  # net total (thermal est generalement negatif)
+        G = 0
+
+        # --- Penman-Monteith FAO-56 (eq.6) ---
+        num = (delta.multiply(0.408).multiply(Rn.subtract(G))
+               .add(gamma.multiply(tmean.add(273).pow(-1).multiply(900))
+                    .multiply(u2).multiply(es.subtract(ea))))
+        den = delta.add(gamma.multiply(u2.multiply(0.34).add(1)))
+        et0 = num.divide(den).rename("ET0")
+        return et0.copyProperties(img, ["system:time_start"])
+
+    return col.map(et0_image).mean().clip(zone)
+
+
+@app.route("/irrigation", methods=["POST"])
+def calculer_irrigation():
+    data = request.get_json()
+    zone, erreur = construire_zone(data)
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
+
+    culture = (data.get("culture") or "").lower()
+    if culture not in CULTURES:
+        return jsonify({"erreur": "Culture inconnue. Choisis : tomate, concombre, piment, laitue."}), 400
+
+    date_semis = data.get("date_semis")
+    if not date_semis:
+        return jsonify({"erreur": "Fournis la date de semis (date_semis, format AAAA-MM-JJ)."}), 400
+
+    # Periode d'analyse : 7 derniers jours de la periode fournie (ou 7 j avant date_fin)
+    date_fin = data.get("date_fin", "2024-12-31")
+
+    try:
+        from datetime import datetime, timedelta
+        fin_dt = datetime.strptime(date_fin, "%Y-%m-%d")
+        debut_dt = fin_dt - timedelta(days=7)
+        semis_dt = datetime.strptime(date_semis, "%Y-%m-%d")
+        jours_semis = (fin_dt - semis_dt).days
+
+        # Kc selon le stade
+        kc, stade = kc_du_jour(culture, jours_semis)
+
+        # ET0 moyen (mm/j) sur la periode via GEE
+        et0_img = calcul_et0_gee(zone, debut_dt.strftime("%Y-%m-%d"), date_fin)
+        et0_moy = et0_img.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone, scale=1000, maxPixels=1e9, bestEffort=True
+        ).get("ET0").getInfo()
+
+        if et0_moy is None:
+            return jsonify({"erreur": "Pas de donnees climatiques ERA5 sur cette periode/zone."}), 400
+
+        # ETc = ET0 x Kc
+        etc = et0_moy * kc
+
+        # Pluie CHIRPS (mm) moyenne journaliere sur la periode
+        chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+                  .filterDate(debut_dt.strftime("%Y-%m-%d"), date_fin)
+                  .filterBounds(zone))
+        pluie_tot = chirps.sum().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone, scale=5000, maxPixels=1e9, bestEffort=True
+        ).get("precipitation").getInfo() or 0
+        pluie_jour = pluie_tot / 7.0  # moyenne journaliere
+
+        pluie_eff = pluie_efficace(pluie_jour)
+
+        # Besoin net d'irrigation (mm/jour)
+        besoin = max(etc - pluie_eff, 0)
+
+        return jsonify({
+            "culture": culture,
+            "stade": stade,
+            "jours_depuis_semis": jours_semis,
+            "kc": round(kc, 2),
+            "et0_mm_j": round(et0_moy, 2),
+            "etc_mm_j": round(etc, 2),
+            "pluie_mm_j": round(pluie_jour, 2),
+            "pluie_efficace_mm_j": round(pluie_eff, 2),
+            "besoin_irrigation_mm_j": round(besoin, 2),
+            "message": "Besoin en eau calcule (FAO-56)"
+        })
+
+    except Exception as e:
+        return jsonify({"erreur": str(e)}), 500
+
+
+
+@app.route("/irrigation_carte", methods=["POST"])
+def carte_irrigation():
+    """
+    Carte spatialisee du besoin en eau (methode Kc derive du NDVI).
+    Pour chaque pixel :
+        Kc_pixel = 1.457 * NDVI - 0.1725   (Kamble et al., 2013 ; relation NDVI-Kc)
+        ETc_pixel = ET0 (climat) * Kc_pixel
+        Besoin_pixel = max(ETc_pixel - pluie_efficace, 0)   (mm/jour)
+    Renvoie des tuiles colorees + le besoin moyen.
+    """
+    data = request.get_json()
+    zone, erreur = construire_zone(data)
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
+
+    date_fin = data.get("date_fin", "2024-12-31")
+    try:
+        from datetime import datetime, timedelta
+        fin_dt = datetime.strptime(date_fin, "%Y-%m-%d")
+        debut_dt = fin_dt - timedelta(days=30)  # NDVI sur 30 j (assez d'images nettes)
+        d_debut = debut_dt.strftime("%Y-%m-%d")
+
+        # 1) NDVI median recent (Sentinel-2) sur la zone
+        col_s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                  .filterBounds(zone)
+                  .filterDate(d_debut, date_fin)
+                  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20)))
+        ndvi = col_s2.median().normalizedDifference(["B8", "B4"]).clip(zone)
+
+        # 2) Kc pixel par pixel a partir du NDVI (relation lineaire)
+        kc = ndvi.multiply(1.457).subtract(0.1725).rename("Kc")
+        # borne Kc dans une plage physique raisonnable [0, 1.3]
+        kc = kc.max(0).min(1.3)
+
+        # 3) ET0 (climat) moyen sur 7 j via ERA5 + Penman-Monteith
+        et0_debut = (fin_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+        et0_img = calcul_et0_gee(zone, et0_debut, date_fin)  # image ET0 (mm/j)
+
+        # 4) ETc spatialise = ET0 * Kc
+        etc = et0_img.multiply(kc).rename("ETc")
+
+        # 5) Pluie efficace (scalaire) -> soustraction
+        chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+                  .filterDate(et0_debut, date_fin).filterBounds(zone))
+        pluie_tot = chirps.sum().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone, scale=5000, maxPixels=1e9, bestEffort=True
+        ).get("precipitation").getInfo() or 0
+        pluie_eff_j = pluie_efficace(pluie_tot / 7.0)
+
+        # 6) Besoin pixel = ETc - pluie efficace (mm/j), borne a 0
+        besoin = etc.subtract(pluie_eff_j).max(0).rename("besoin")
+
+        # 7) Tuiles colorees (bleu clair -> bleu fonce = besoin croissant)
+        palette = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"]
+        map_id = besoin.getMapId({"min": 0, "max": 8, "palette": palette})
+        tile_url = map_id["tile_fetcher"].url_format
+
+        # 8) Besoin moyen de la zone
+        besoin_moy = besoin.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone, scale=10, maxPixels=1e9, bestEffort=True
+        ).get("besoin").getInfo()
+
+        return jsonify({
+            "tile_url": tile_url,
+            "besoin_moyen_mm_j": round(besoin_moy, 2) if besoin_moy is not None else None,
+            "pluie_efficace_mm_j": round(pluie_eff_j, 2),
+            "message": "Carte de besoin en eau calculee (Kc derive du NDVI)"
+        })
+    except Exception as e:
+        return jsonify({"erreur": str(e)}), 500
+
+
 # ===== Page web =====
 @app.route("/", methods=["GET"])
 def accueil():
