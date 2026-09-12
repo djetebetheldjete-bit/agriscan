@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgriScan — Test stats + anomalie</title>
+<style>
+  * { box-sizing:border-box; }
+  body { font-family: system-ui, sans-serif; background:#f5f3ee; color:#161512; padding:24px; max-width:820px; margin:auto; }
+  h1 { color:#0f6e56; font-size:20px; margin-bottom:4px; }
+  p.sous { color:#888; font-size:13px; margin-bottom:20px; }
+  fieldset { border:1px solid #ccc; border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  legend { font-weight:700; color:#0f6e56; padding:0 6px; }
+  label { font-size:13px; font-weight:600; color:#555; }
+  input, textarea { padding:8px; border:1px solid #ccc; border-radius:8px; font-size:13px; }
+  input[type=number] { width:110px; }
+  textarea { width:100%; min-height:70px; font-family:monospace; }
+  .ligne { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .btn { background:#0f6e56; color:#fff; border:none; padding:10px 18px; border-radius:8px; font-weight:700; cursor:pointer; font-size:14px; margin-right:8px; }
+  .btn.sec { background:#b06e12; }
+  .btn:disabled { opacity:0.5; cursor:wait; }
+  .cartes { display:flex; gap:14px; flex-wrap:wrap; margin:14px 0; }
+  .carte { flex:1; min-width:120px; background:#fff; border:1px solid #ddd; border-radius:12px; padding:14px; text-align:center; }
+  .carte .v { font-size:24px; font-weight:800; color:#0f6e56; }
+  .carte .l { font-size:12px; color:#888; margin-top:4px; }
+  .verif { font-size:13px; padding:10px 12px; border-radius:8px; margin-top:8px; }
+  .verif.ok { background:#eaf5f1; color:#0f6e56; }
+  .verif.err { background:#fbecea; color:#b23b2e; }
+  pre { background:#141d1a; color:#c8f2e0; padding:14px; border-radius:10px; font-size:12px; overflow:auto; }
+  .msg { font-size:13px; margin:8px 0; }
+  .msg.err { color:#b23b2e; } .msg.ok { color:#0f6e56; }
+  h2 { font-size:15px; color:#0f6e56; margin:18px 0 8px; }
+</style>
+</head>
+<body>
+  <h1>🧪 AgriScan — Test stats + anomalie</h1>
+  <p class="sous">Vérifie les chiffres renvoyés par la passerelle avant qu'on les habille dans l'interface. Pas de carte ici.</p>
+
+  <fieldset>
+    <legend>Zone rectangle (par défaut : Sinfra)</legend>
+    <div class="ligne">
+      <div><label>Ouest</label><br><input id="ouest" type="number" step="0.001" value="-5.945"></div>
+      <div><label>Sud</label><br><input id="sud" type="number" step="0.001" value="6.835"></div>
+      <div><label>Est</label><br><input id="est" type="number" step="0.001" value="-5.895"></div>
+      <div><label>Nord</label><br><input id="nord" type="number" step="0.001" value="6.875"></div>
+    </div>
+    <div class="ligne">
+      <div><label>Du</label><br><input id="dateDebut" type="date" value="2024-01-01"></div>
+      <div><label>au</label><br><input id="dateFin" type="date" value="2024-12-31"></div>
+    </div>
+    <button class="btn" id="btnRect" onclick="testerRectangle('ndvi')">Tester stats (NDVI)</button>
+    <button class="btn sec" id="btnRectAno" onclick="testerRectangle('anomalie')">Tester anomalie</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Ou coller un polygone GeoJSON (facultatif)</legend>
+    <textarea id="geojson" placeholder='{"type":"Polygon","coordinates":[[[-5.945,6.835],[-5.895,6.835],[-5.89,6.865],[-5.945,6.835]]]}'></textarea>
+    <div class="ligne" style="margin-top:10px;">
+      <button class="btn" id="btnPoly" onclick="testerPolygone('ndvi')">Tester stats (NDVI)</button>
+      <button class="btn sec" id="btnPolyAno" onclick="testerPolygone('anomalie')">Tester anomalie</button>
+    </div>
+  </fieldset>
+
+  <div id="msg" class="msg"></div>
+
+  <!-- Cartes NDVI/stats -->
+  <div id="zoneNdvi" style="display:none;">
+    <h2>Statistiques NDVI</h2>
+    <div class="cartes">
+      <div class="carte"><div class="v" id="vSurface">—</div><div class="l">Surface (ha)</div></div>
+      <div class="carte"><div class="v" id="vNdvi">—</div><div class="l">NDVI moyen</div></div>
+      <div class="carte"><div class="v" id="vSain">—</div><div class="l">Sain (%)</div></div>
+      <div class="carte"><div class="v" id="vMoyen">—</div><div class="l">Moyen (%)</div></div>
+      <div class="carte"><div class="v" id="vFaible">—</div><div class="l">Faible (%)</div></div>
+    </div>
+    <div id="verifSomme" class="verif"></div>
+  </div>
+
+  <!-- Cartes anomalie -->
+  <div id="zoneAno" style="display:none;">
+    <h2>Détection de changement (récent vs référence)</h2>
+    <div class="cartes">
+      <div class="carte"><div class="v" id="vDeg" style="color:#b2182b;">—</div><div class="l">Dégradé (%)</div></div>
+      <div class="carte"><div class="v" id="vSta">—</div><div class="l">Stable (%)</div></div>
+      <div class="carte"><div class="v" id="vAme" style="color:#1b7837;">—</div><div class="l">Amélioré (%)</div></div>
+    </div>
+    <div id="verifPeriodes" class="verif ok"></div>
+    <div id="verifSommeAno" class="verif"></div>
+  </div>
+
+  <h2>Réponse brute (JSON) :</h2>
+  <pre id="brut">—</pre>
+
+<script>
+  async function envoyer(corps, route, bouton){
+    const msg = document.getElementById('msg');
+    bouton.disabled = true;
+    msg.className = 'msg';
+    msg.textContent = '⏳ Calcul en cours… (l\'anomalie peut prendre 15-40 s)';
+
+    try {
+      const rep = await fetch('http://127.0.0.1:5000/' + route, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(corps)
+      });
+      const data = await rep.json();
+      document.getElementById('brut').textContent = JSON.stringify(data, null, 2);
+
+      if (data.erreur) {
+        msg.className = 'msg err';
+        msg.textContent = '❌ Erreur : ' + data.erreur;
+        bouton.disabled = false; return;
+      }
+
+      if (route === 'ndvi') {
+        document.getElementById('zoneNdvi').style.display = 'block';
+        document.getElementById('vSurface').textContent = data.surface_ha ?? '—';
+        document.getElementById('vNdvi').textContent    = data.ndvi_moyen ?? '—';
+        document.getElementById('vSain').textContent    = data.pct_sain ?? '—';
+        document.getElementById('vMoyen').textContent   = data.pct_moyen ?? '—';
+        document.getElementById('vFaible').textContent  = data.pct_faible ?? '—';
+        const s = (data.pct_sain||0)+(data.pct_moyen||0)+(data.pct_faible||0);
+        const vs = document.getElementById('verifSomme');
+        vs.className = 'verif ' + (Math.abs(s-100)<=0.5 ? 'ok':'err');
+        vs.textContent = (Math.abs(s-100)<=0.5?'✓ ':'⚠ ') + 'Somme = ' + s.toFixed(1) + '%';
+      } else {
+        document.getElementById('zoneAno').style.display = 'block';
+        document.getElementById('vDeg').textContent = data.pct_degrade ?? '—';
+        document.getElementById('vSta').textContent = data.pct_stable ?? '—';
+        document.getElementById('vAme').textContent = data.pct_ameliore ?? '—';
+        const r = data.periode_reference, c = data.periode_recente;
+        document.getElementById('verifPeriodes').textContent =
+          '📅 Référence : ' + r.debut + ' → ' + r.fin + '   |   Récent : ' + c.debut + ' → ' + c.fin;
+        const s = (data.pct_degrade||0)+(data.pct_stable||0)+(data.pct_ameliore||0);
+        const vs = document.getElementById('verifSommeAno');
+        vs.className = 'verif ' + (Math.abs(s-100)<=0.5 ? 'ok':'err');
+        vs.textContent = (Math.abs(s-100)<=0.5?'✓ ':'⚠ ') + 'Somme = ' + s.toFixed(1) + '%';
+      }
+
+      msg.className = 'msg ok';
+      msg.textContent = '✓ Réponse reçue.';
+    } catch(e) {
+      msg.className = 'msg err';
+      msg.textContent = "❌ Impossible de joindre la passerelle. Vérifie qu'elle tourne (py passerelle.py).";
+    }
+    bouton.disabled = false;
+  }
+
+  function corpsDates(){
+    return {
+      date_debut: document.getElementById('dateDebut').value,
+      date_fin: document.getElementById('dateFin').value
+    };
+  }
+
+  function testerRectangle(route){
+    const corps = Object.assign({
+      bbox: [parseFloat(ouest.value), parseFloat(sud.value), parseFloat(est.value), parseFloat(nord.value)]
+    }, corpsDates());
+    const b = route==='ndvi' ? btnRect : btnRectAno;
+    envoyer(corps, route, b);
+  }
+
+  function testerPolygone(route){
+    const msg = document.getElementById('msg');
+    let texte = document.getElementById('geojson').value.trim();
+    if (!texte) { msg.className='msg err'; msg.textContent='❌ Colle d\'abord un polygone.'; return; }
+    let points = null;
+    try {
+      const obj = JSON.parse(texte);
+      if (Array.isArray(obj)) points = obj;
+      else if (obj.type === 'Polygon') points = obj.coordinates[0];
+      else if (obj.type === 'Feature') points = obj.geometry.coordinates[0];
+      else if (obj.type === 'FeatureCollection') points = obj.features[0].geometry.coordinates[0];
+    } catch(err) { msg.className='msg err'; msg.textContent='❌ JSON invalide : '+err.message; return; }
+    if (!points) { msg.className='msg err'; msg.textContent='❌ Polygone introuvable.'; return; }
+    const corps = Object.assign({ polygon: points }, corpsDates());
+    const b = route==='ndvi' ? btnPoly : btnPolyAno;
+    envoyer(corps, route, b);
+  }
+</script>
+</body>
+</html>

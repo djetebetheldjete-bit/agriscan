@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgriScan — Surveillance des cultures</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --vert:#0F6E56; --vert-profond:#0A4E3D; --vert-clair:#E5F0EA;
+    --fond:#F6F8F5; --carte:#FFFFFF; --encre:#1A2420; --gris:#6B7B73; --bord:#E1E8E3;
+    --sain:#3B8C4E; --moyen:#D9A441; --faible:#C0492E;
+  }
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  body{ font-family:'Inter',system-ui,sans-serif; background:var(--fond); color:var(--encre); font-size:14px; line-height:1.5; }
+  .num{ font-variant-numeric:tabular-nums; }
+
+  /* Barre du haut */
+  .topbar{ background:var(--vert-profond); color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; }
+  .topbar .logo{ font-weight:800; font-size:18px; letter-spacing:-0.3px; display:flex; align-items:center; gap:9px; }
+  .topbar .parcelle{ margin-left:auto; text-align:right; font-size:13px; opacity:.92; }
+  .topbar .parcelle b{ font-size:16px; display:block; font-weight:700; }
+
+  /* Disposition tableau de bord */
+  .app{ display:grid; grid-template-columns:320px 1fr; gap:0; min-height:calc(100vh - 56px); }
+  .panneau{ background:var(--carte); border-right:1px solid var(--bord); padding:18px; overflow-y:auto; }
+  .contenu{ padding:18px; overflow-y:auto; }
+
+  .groupe{ margin-bottom:20px; }
+  .groupe > .titre{ font-size:12px; font-weight:700; color:var(--vert); margin-bottom:9px; }
+  label{ font-size:12px; font-weight:600; color:var(--gris); display:block; margin-bottom:4px; }
+  input[type=text], input[type=date], input[type=number], select{
+    width:100%; padding:9px 11px; border:1px solid var(--bord); border-radius:9px; font-size:13px; font-family:inherit; background:#fff; color:var(--encre);
+  }
+  input:focus, select:focus{ outline:2px solid var(--vert); outline-offset:1px; border-color:var(--vert); }
+  .duo{ display:flex; gap:8px; }
+  .duo > div{ flex:1; }
+
+  .btn{ width:100%; background:var(--vert); color:#fff; border:none; padding:11px 14px; border-radius:9px; font-weight:600; font-size:13px; cursor:pointer; font-family:inherit; transition:background .15s; }
+  .btn:hover{ background:var(--vert-profond); }
+  .btn:disabled{ opacity:.5; cursor:wait; }
+  .btn.ligne2{ margin-top:8px; }
+  .btn.clair{ background:#eef2ef; color:var(--encre); }
+  .btn.clair:hover{ background:#e2e9e4; }
+  .btn.import{ display:block; text-align:center; margin-top:8px; }
+
+  .astuce{ font-size:12px; color:var(--gris); margin-top:8px; line-height:1.45; }
+  .resultats{ background:#fff; border:1px solid var(--bord); border-radius:9px; margin-top:6px; overflow:hidden; display:none; }
+  .resultats div{ padding:9px 11px; font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--bord); }
+  .resultats div:last-child{ border-bottom:none; }
+  .resultats div:hover{ background:var(--vert-clair); }
+
+  /* Carte */
+  .carte-wrap{ background:var(--carte); border:1px solid var(--bord); border-radius:14px; overflow:hidden; margin-bottom:16px; }
+  .carte-tete{ display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--bord); flex-wrap:wrap; }
+  .onglets{ display:flex; gap:4px; background:var(--fond); padding:3px; border-radius:9px; }
+  .onglet{ padding:7px 14px; border-radius:7px; font-size:12.5px; font-weight:600; cursor:pointer; color:var(--gris); border:none; background:none; font-family:inherit; }
+  .onglet.actif{ background:#fff; color:var(--vert); box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .legende{ margin-left:auto; display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--gris); }
+  .barre-leg{ width:120px; height:9px; border-radius:5px; }
+  .barre-ndvi{ background:linear-gradient(90deg,#a52a2a,#d9a441,#ffff99,#97c459,#3b6d11,#173404); }
+  .barre-ano{ background:linear-gradient(90deg,#b2182b,#f7f7f7,#1b7837); }
+  #map{ height:46vh; min-height:340px; width:100%; }
+
+  /* Rangee de stats */
+  .stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
+  .stat{ background:var(--carte); border:1px solid var(--bord); border-radius:12px; padding:15px 16px; position:relative; }
+  .stat .v{ font-size:28px; font-weight:800; letter-spacing:-0.5px; }
+  .stat .l{ font-size:12px; color:var(--gris); margin-top:2px; }
+  .stat .barre-etat{ position:absolute; left:0; top:12px; bottom:12px; width:4px; border-radius:4px; }
+  .stat.principale .v{ color:var(--vert); }
+  .stat.s-sain .barre-etat{ background:var(--sain); } .stat.s-sain .v{ color:var(--sain); }
+  .stat.s-moyen .barre-etat{ background:var(--moyen); } .stat.s-moyen .v{ color:var(--moyen); }
+  .stat.s-faible .barre-etat{ background:var(--faible); } .stat.s-faible .v{ color:var(--faible); }
+
+  /* Alerte */
+  .alerte{ border-radius:12px; padding:14px 16px; margin-bottom:16px; font-size:13.5px; display:none; align-items:flex-start; gap:10px; }
+  .alerte .ico{ font-size:18px; line-height:1; }
+  .alerte.rouge{ background:#fbeae6; border:1px solid #f0c4ba; color:#8f3120; }
+  .alerte.orange{ background:#fdf3e0; border:1px solid #f0dcae; color:#8a6316; }
+  .alerte.vert{ background:var(--vert-clair); border:1px solid #c3ddd0; color:var(--vert-profond); }
+
+  /* Graphiques */
+  .graphs{ display:grid; grid-template-columns:1.6fr 1fr; gap:16px; }
+  .panel{ background:var(--carte); border:1px solid var(--bord); border-radius:14px; padding:16px; }
+  .panel h3{ font-size:14px; font-weight:700; margin-bottom:4px; }
+  .panel .sous{ font-size:12px; color:var(--gris); margin-bottom:12px; }
+  .panel .canvas-box{ position:relative; height:240px; }
+  .panel-secondaires{ display:flex; flex-direction:column; gap:16px; }
+  .mini-canvas{ position:relative; height:180px; }
+  .granularite{ display:flex; gap:4px; background:var(--fond); padding:3px; border-radius:8px; margin-left:auto; }
+  .granularite button{ padding:5px 12px; border:none; background:none; border-radius:6px; font-size:12px; font-weight:600; color:var(--gris); cursor:pointer; font-family:inherit; }
+  .granularite button.actif{ background:#fff; color:var(--vert); box-shadow:0 1px 2px rgba(0,0,0,.08); }
+  .ligne-titre{ display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .ligne-titre h3{ margin:0; } .ligne-titre .sous{ margin:0; }
+
+  .msg{ font-size:12.5px; padding:9px 12px; border-radius:8px; margin-bottom:14px; display:none; }
+  .msg.ok{ background:var(--vert-clair); color:var(--vert-profond); display:block; }
+  .msg.err{ background:#fbeae6; color:#8f3120; display:block; }
+  .msg.info{ background:#eef2ef; color:var(--gris); display:block; }
+
+  .vide{ background:var(--carte); border:1px dashed var(--bord); border-radius:14px; padding:40px 20px; text-align:center; color:var(--gris); font-size:13.5px; }
+
+  @media (max-width:860px){
+    .app{ grid-template-columns:1fr; }
+    .panneau{ border-right:none; border-bottom:1px solid var(--bord); }
+    .graphs{ grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo">🛰️ AgriScan</div>
+    <div class="parcelle" id="enteteParcelle">
+      <b>Aucune parcelle</b>
+      <span>Délimite une zone pour commencer</span>
+    </div>
+  </div>
+
+  <div class="app">
+    <!-- PANNEAU DE CONTROLE -->
+    <aside class="panneau">
+      <div class="groupe">
+        <div class="titre">Localiser</div>
+        <input type="text" id="lieu" placeholder="Ville, commune, pays…"
+               onkeydown="if(event.key==='Enter') chercherLieu()">
+        <button class="btn ligne2" onclick="chercherLieu()">Aller au lieu</button>
+        <div class="resultats" id="resultats"></div>
+      </div>
+
+      <div class="groupe">
+        <div class="titre">Période</div>
+        <div class="duo">
+          <div><label>Début</label><input type="date" id="dateDebut" value="2024-01-01"></div>
+          <div><label>Fin</label><input type="date" id="dateFin" value="2024-12-31"></div>
+        </div>
+      </div>
+
+      <div class="groupe">
+        <div class="titre">Délimiter la parcelle</div>
+        <div class="astuce">Utilise les outils de dessin sur la carte (rectangle ou polygone), ou importe un fichier.</div>
+        <label class="btn clair import" for="fichierGeojson">Importer un GeoJSON</label>
+        <input type="file" id="fichierGeojson" accept=".geojson,.json" style="display:none" onchange="importerGeojson(event)">
+      </div>
+
+      <div class="groupe">
+        <div class="titre">Analyser</div>
+        <button class="btn" id="btnNdvi" onclick="analyser()">Analyser la santé (NDVI)</button>
+        <button class="btn clair ligne2" id="btnEvolution" onclick="analyserEvolution()">Calculer l'évolution</button>
+        <button class="btn clair ligne2" id="btnAnomalie" onclick="analyserAnomalie()">Détecter les changements</button>
+        <button class="btn clair ligne2" onclick="effacerZone()">Effacer la zone</button>
+      </div>
+    </aside>
+
+    <!-- CONTENU / RESULTATS -->
+    <main class="contenu">
+      <div class="msg" id="msg"></div>
+
+      <!-- Carte -->
+      <div class="carte-wrap">
+        <div class="carte-tete">
+          <div class="onglets">
+            <button class="onglet actif" id="ongletNdvi" onclick="basculerCarte('ndvi')">Santé (NDVI)</button>
+            <button class="onglet" id="ongletAno" onclick="basculerCarte('anomalie')">Changements</button>
+          </div>
+          <div class="legende" id="legendeCarte">
+            <span>Sol nu</span><div class="barre-leg barre-ndvi"></div><span>Végétation dense</span>
+          </div>
+        </div>
+        <div id="map"></div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats" id="blocStats" style="display:none;">
+        <div class="stat principale"><div class="v num" id="vNdvi">—</div><div class="l">NDVI moyen</div></div>
+        <div class="stat s-sain"><div class="barre-etat"></div><div class="v num" id="vSain">—</div><div class="l">Zone saine</div></div>
+        <div class="stat s-moyen"><div class="barre-etat"></div><div class="v num" id="vMoyen">—</div><div class="l">À surveiller</div></div>
+        <div class="stat s-faible"><div class="barre-etat"></div><div class="v num" id="vFaible">—</div><div class="l">Zone faible</div></div>
+        <div class="stat"><div class="v num" id="vSurface">—</div><div class="l">Surface (ha)</div></div>
+      </div>
+
+      <!-- Alerte -->
+      <div class="alerte" id="alerte"><span class="ico" id="alerteIco">⚠️</span><span id="alerteTxt"></span></div>
+
+      <!-- Graphiques -->
+      <div class="graphs" id="blocGraphs" style="display:none;">
+        <div class="panel">
+          <div class="ligne-titre">
+            <div>
+              <h3>Évolution du NDVI</h3>
+              <div class="sous" id="sousEvolution">Moyenne de la parcelle dans le temps</div>
+            </div>
+            <div class="granularite">
+              <button id="gMois" class="actif" onclick="changerGranularite('mois')">Mois</button>
+              <button id="gSemaine" onclick="changerGranularite('semaine')">Semaine</button>
+            </div>
+          </div>
+          <div class="canvas-box"><canvas id="graphEvolution"></canvas></div>
+        </div>
+
+        <div class="panel-secondaires">
+          <div class="panel">
+            <h3>Répartition de la végétation</h3>
+            <div class="sous">Part de la parcelle par état</div>
+            <div class="mini-canvas"><canvas id="graphDonut"></canvas></div>
+          </div>
+          <div class="panel">
+            <h3>Changements détectés</h3>
+            <div class="sous" id="sousAno">Lance « Détecter les changements »</div>
+            <div class="mini-canvas"><canvas id="graphBarres"></canvas></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vide" id="etatVide">Délimite une parcelle sur la carte, puis lance une analyse. Les indicateurs et graphiques s'afficheront ici.</div>
+    </main>
+  </div>
+
+<script>
+  // L'API est servie par la meme origine que la page (local ou en ligne).
+  // En local si on ouvre le fichier directement (protocol file:), on retombe sur 127.0.0.1:5000.
+  const API = (location.protocol === 'file:') ? 'http://127.0.0.1:5000' : location.origin;
+  const map = L.map('map').setView([4.76, -6.70], 12);
+  const fondOSM = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+  let coucheNdvi=null, coucheAno=null, coucheZone=null, zoneActive=null, marqueurLieu=null;
+  let modeCarte='ndvi', granularite='mois';
+  let chartEvolution=null, chartDonut=null, chartBarres=null;
+  let derniereZonePourEvolution=null;
+
+  const groupeDessin = new L.FeatureGroup();
+  map.addLayer(groupeDessin);
+  const outilsDessin = new L.Control.Draw({
+    draw:{ rectangle:{shapeOptions:{color:'#0F6E56',weight:2,fill:false}},
+           polygon:{shapeOptions:{color:'#0F6E56',weight:2,fill:false},allowIntersection:false,showArea:true},
+           polyline:false, circle:false, marker:false, circlemarker:false },
+    edit:{ featureGroup:groupeDessin, remove:true }
+  });
+  map.addControl(outilsDessin);
+
+  map.on(L.Draw.Event.CREATED, function(e){
+    groupeDessin.clearLayers();
+    coucheZone = e.layer; groupeDessin.addLayer(coucheZone);
+    if(e.layerType==='rectangle'){
+      const b=coucheZone.getBounds();
+      zoneActive={ bbox:[b.getWest(),b.getSouth(),b.getEast(),b.getNorth()] };
+    } else if(e.layerType==='polygon'){
+      zoneActive={ polygon: coucheZone.getLatLngs()[0].map(p=>[p.lng,p.lat]) };
+    }
+    analyser();
+  });
+
+  function corpsRequete(){
+    return Object.assign({}, zoneActive, {
+      date_debut: document.getElementById('dateDebut').value || '2024-01-01',
+      date_fin:   document.getElementById('dateFin').value   || '2024-12-31'
+    });
+  }
+  function afficherMsg(texte, type){
+    const m=document.getElementById('msg'); m.className='msg '+type; m.textContent=texte;
+  }
+
+  // ===== Recherche de lieu =====
+  async function chercherLieu(){
+    const requete=document.getElementById('lieu').value.trim();
+    const boite=document.getElementById('resultats');
+    if(!requete) return;
+    afficherMsg('Recherche du lieu…','info');
+    boite.style.display='none'; boite.innerHTML='';
+    try{
+      const url='https://nominatim.openstreetmap.org/search?format=json&limit=5&q='+encodeURIComponent(requete);
+      const rep=await fetch(url,{headers:{'Accept-Language':'fr'}});
+      const lieux=await rep.json();
+      if(!lieux.length){ afficherMsg('Aucun lieu trouvé pour « '+requete+' ».','err'); return; }
+      document.getElementById('msg').style.display='none';
+      if(lieux.length===1){ allerAuLieu(lieux[0]); }
+      else{
+        lieux.forEach(l=>{ const d=document.createElement('div'); d.textContent=l.display_name;
+          d.onclick=()=>{boite.style.display='none'; allerAuLieu(l);}; boite.appendChild(d); });
+        boite.style.display='block';
+      }
+    }catch(e){ afficherMsg('Recherche impossible (connexion internet ?).','err'); }
+  }
+  function allerAuLieu(lieu){
+    const lat=parseFloat(lieu.lat), lon=parseFloat(lieu.lon);
+    if(lieu.boundingbox){ const bb=lieu.boundingbox.map(parseFloat); map.fitBounds([[bb[0],bb[2]],[bb[1],bb[3]]]); }
+    else{ map.setView([lat,lon],13); }
+    if(marqueurLieu) map.removeLayer(marqueurLieu);
+    marqueurLieu=L.marker([lat,lon]).addTo(map).bindPopup(lieu.display_name).openPopup();
+    afficherMsg('Zone localisée. Délimite ta parcelle avec les outils de dessin.','ok');
+  }
+
+  // ===== Import GeoJSON =====
+  function importerGeojson(event){
+    const fichier=event.target.files[0]; if(!fichier) return;
+    const lecteur=new FileReader();
+    lecteur.onload=function(e){
+      try{
+        const geo=JSON.parse(e.target.result);
+        groupeDessin.clearLayers();
+        const couche=L.geoJSON(geo,{style:{color:'#0F6E56',weight:2,fill:false}});
+        groupeDessin.addLayer(couche); coucheZone=couche;
+        const points=extrairePolygone(geo);
+        if(!points){ afficherMsg('Le fichier ne contient pas de polygone exploitable.','err'); return; }
+        zoneActive={polygon:points};
+        map.fitBounds(couche.getBounds());
+        analyser();
+      }catch(err){ afficherMsg('Fichier GeoJSON illisible : '+err.message,'err'); }
+    };
+    lecteur.readAsText(fichier); event.target.value='';
+  }
+  function extrairePolygone(geo){
+    function g2(g){ if(!g) return null;
+      if(g.type==='Polygon') return g.coordinates[0];
+      if(g.type==='MultiPolygon') return g.coordinates[0][0]; return null; }
+    if(geo.type==='FeatureCollection'){ for(const f of geo.features){ const p=g2(f.geometry); if(p) return p; } return null; }
+    if(geo.type==='Feature') return g2(geo.geometry);
+    return g2(geo);
+  }
+
+  function effacerZone(){
+    groupeDessin.clearLayers(); coucheZone=null; zoneActive=null;
+    if(coucheNdvi){map.removeLayer(coucheNdvi); coucheNdvi=null;}
+    if(coucheAno){map.removeLayer(coucheAno); coucheAno=null;}
+    document.getElementById('blocStats').style.display='none';
+    document.getElementById('blocGraphs').style.display='none';
+    document.getElementById('alerte').style.display='none';
+    document.getElementById('etatVide').style.display='block';
+    document.getElementById('enteteParcelle').innerHTML='<b>Aucune parcelle</b><span>Délimite une zone pour commencer</span>';
+    document.getElementById('msg').style.display='none';
+  }
+
+  // ===== Analyse NDVI + stats =====
+  async function analyser(){
+    if(!zoneActive){ afficherMsg('Délimite ou importe d\'abord une zone.','err'); return; }
+    const btn=document.getElementById('btnNdvi'); btn.disabled=true;
+    afficherMsg('Analyse de la santé en cours…','info');
+    try{
+      const rep=await fetch(API+'/ndvi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corpsRequete())});
+      const data=await rep.json();
+      if(data.erreur){ afficherMsg('Erreur : '+data.erreur,'err'); btn.disabled=false; return; }
+
+      if(coucheNdvi) map.removeLayer(coucheNdvi);
+      coucheNdvi=L.tileLayer(data.tile_url,{opacity:0.85});
+      if(modeCarte==='ndvi') coucheNdvi.addTo(map);
+      if(coucheZone) map.fitBounds(coucheZone.getBounds());
+
+      // Stats
+      document.getElementById('etatVide').style.display='none';
+      document.getElementById('blocStats').style.display='grid';
+      document.getElementById('blocGraphs').style.display='grid';
+      document.getElementById('vNdvi').textContent=data.ndvi_moyen ?? '—';
+      document.getElementById('vSain').textContent=(data.pct_sain ?? '—')+(data.pct_sain!=null?'%':'');
+      document.getElementById('vMoyen').textContent=(data.pct_moyen ?? '—')+(data.pct_moyen!=null?'%':'');
+      document.getElementById('vFaible').textContent=(data.pct_faible ?? '—')+(data.pct_faible!=null?'%':'');
+      document.getElementById('vSurface').textContent=data.surface_ha ?? '—';
+
+      document.getElementById('enteteParcelle').innerHTML=
+        '<b>Parcelle active</b><span>'+(data.surface_ha ?? '—')+' ha · NDVI '+(data.ndvi_moyen ?? '—')+'</span>';
+
+      majDonut(data.pct_sain, data.pct_moyen, data.pct_faible);
+      majAlerte(data);
+      afficherMsg('Analyse terminée.','ok');
+      basculerCarte('ndvi');
+    }catch(e){ afficherMsg('Impossible de joindre la passerelle (py passerelle.py).','err'); }
+    btn.disabled=false;
+  }
+
+  function majAlerte(data){
+    const a=document.getElementById('alerte'), t=document.getElementById('alerteTxt'), i=document.getElementById('alerteIco');
+    a.style.display='flex';
+    const faible=data.pct_faible||0, moyen=data.pct_moyen||0;
+    if(faible>=25){
+      a.className='alerte rouge'; i.textContent='⚠️';
+      t.textContent='Alerte : '+faible+'% de la parcelle présente une végétation faible. Vérifie l\'état du sol ou l\'irrigation sur ces secteurs.';
+    } else if(faible+moyen>=50){
+      a.className='alerte orange'; i.textContent='👀';
+      t.textContent='À surveiller : '+(Math.round((faible+moyen)*10)/10)+'% de la parcelle n\'est pas en pleine vigueur. Un suivi rapproché est conseillé.';
+    } else {
+      a.className='alerte vert'; i.textContent='✅';
+      t.textContent='Parcelle en bonne santé : la végétation est majoritairement vigoureuse.';
+    }
+  }
+
+  // ===== Evolution =====
+  async function analyserEvolution(){
+    if(!zoneActive){ afficherMsg('Délimite ou importe d\'abord une zone.','err'); return; }
+    // garde-fou hebdomadaire
+    if(granularite==='semaine'){
+      const d1=new Date(document.getElementById('dateDebut').value), d2=new Date(document.getElementById('dateFin').value);
+      const jours=(d2-d1)/86400000;
+      if(jours>130){ afficherMsg('En pas hebdomadaire, limite la période à ~4 mois pour éviter les délais. Réduis les dates ou repasse en « Mois ».','err'); return; }
+    }
+    const btn=document.getElementById('btnEvolution'); btn.disabled=true;
+    afficherMsg('Calcul de l\'évolution ('+granularite+')… cela peut prendre 15-40 s.','info');
+    try{
+      const corps=Object.assign(corpsRequete(),{pas:granularite});
+      const rep=await fetch(API+'/evolution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corps)});
+      const data=await rep.json();
+      if(data.erreur){ afficherMsg('Erreur : '+data.erreur,'err'); btn.disabled=false; return; }
+      document.getElementById('blocGraphs').style.display='grid';
+      document.getElementById('etatVide').style.display='none';
+      majEvolution(data.points);
+      afficherMsg('Évolution calculée.','ok');
+    }catch(e){ afficherMsg('Impossible de joindre la passerelle.','err'); }
+    btn.disabled=false;
+  }
+
+  function changerGranularite(g){
+    granularite=g;
+    document.getElementById('gMois').classList.toggle('actif', g==='mois');
+    document.getElementById('gSemaine').classList.toggle('actif', g==='semaine');
+    document.getElementById('sousEvolution').textContent =
+      g==='mois' ? 'Moyenne de la parcelle, un point par mois' : 'Moyenne de la parcelle, un point par semaine';
+    if(zoneActive) analyserEvolution();
+  }
+
+  function majEvolution(points){
+    const labels=points.map(p=>p.date), valeurs=points.map(p=>p.ndvi);
+    const manquants=points.filter(p=>p.ndvi===null).length;
+    document.getElementById('sousEvolution').textContent =
+      (granularite==='mois'?'Un point par mois':'Un point par semaine') +
+      (manquants>0 ? ' · '+manquants+' période(s) sans image nette (nuages)' : '');
+    if(chartEvolution) chartEvolution.destroy();
+    chartEvolution=new Chart(document.getElementById('graphEvolution'),{
+      type:'line',
+      data:{ labels, datasets:[{ label:'NDVI moyen', data:valeurs, borderColor:'#0F6E56',
+        backgroundColor:'rgba(15,110,86,.12)', borderWidth:2, pointRadius:3, pointBackgroundColor:'#0F6E56',
+        tension:.3, spanGaps:true, fill:true }]},
+      options:{ responsive:true, maintainAspectRatio:false,
+        scales:{ y:{min:0,max:1,title:{display:true,text:'NDVI'}}, x:{ticks:{maxRotation:60,minRotation:0}} },
+        plugins:{ legend:{display:false} } }
+    });
+  }
+
+  function majDonut(sain,moyen,faible){
+    if(sain==null){ return; }
+    if(chartDonut) chartDonut.destroy();
+    chartDonut=new Chart(document.getElementById('graphDonut'),{
+      type:'doughnut',
+      data:{ labels:['Sain','À surveiller','Faible'],
+        datasets:[{ data:[sain,moyen,faible], backgroundColor:['#3B8C4E','#D9A441','#C0492E'], borderWidth:0 }]},
+      options:{ responsive:true, maintainAspectRatio:false, cutout:'62%',
+        plugins:{ legend:{position:'bottom', labels:{boxWidth:12,font:{size:11}}} } }
+    });
+  }
+
+  // ===== Anomalie =====
+  async function analyserAnomalie(){
+    if(!zoneActive){ afficherMsg('Délimite ou importe d\'abord une zone.','err'); return; }
+    const btn=document.getElementById('btnAnomalie'); btn.disabled=true;
+    afficherMsg('Détection des changements… cela peut prendre 15-40 s.','info');
+    try{
+      const rep=await fetch(API+'/anomalie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corpsRequete())});
+      const data=await rep.json();
+      if(data.erreur){ afficherMsg('Erreur : '+data.erreur,'err'); btn.disabled=false; return; }
+
+      if(coucheAno) map.removeLayer(coucheAno);
+      coucheAno=L.tileLayer(data.tile_url,{opacity:0.85});
+
+      document.getElementById('blocGraphs').style.display='grid';
+      document.getElementById('etatVide').style.display='none';
+      majBarres(data.pct_degrade, data.pct_stable, data.pct_ameliore);
+      const r=data.periode_reference, c=data.periode_recente;
+      document.getElementById('sousAno').textContent='Réf. '+r.debut+' → '+r.fin+'  vs  récent '+c.debut+' → '+c.fin;
+
+      basculerCarte('anomalie');
+      afficherMsg('Changements détectés. Carte « Changements » affichée.','ok');
+    }catch(e){ afficherMsg('Impossible de joindre la passerelle.','err'); }
+    btn.disabled=false;
+  }
+  function majBarres(deg,sta,ame){
+    if(chartBarres) chartBarres.destroy();
+    chartBarres=new Chart(document.getElementById('graphBarres'),{
+      type:'bar',
+      data:{ labels:['Dégradé','Stable','Amélioré'],
+        datasets:[{ data:[deg,sta,ame], backgroundColor:['#C0492E','#B7C2BB','#3B8C4E'], borderRadius:6 }]},
+      options:{ responsive:true, maintainAspectRatio:false,
+        scales:{ y:{beginAtZero:true, max:100, title:{display:true,text:'%'}} },
+        plugins:{ legend:{display:false} } }
+    });
+  }
+
+  // ===== Bascule de carte =====
+  function basculerCarte(mode){
+    modeCarte=mode;
+    document.getElementById('ongletNdvi').classList.toggle('actif', mode==='ndvi');
+    document.getElementById('ongletAno').classList.toggle('actif', mode==='anomalie');
+    const leg=document.getElementById('legendeCarte');
+    if(mode==='ndvi'){
+      if(coucheAno) map.removeLayer(coucheAno);
+      if(coucheNdvi) coucheNdvi.addTo(map);
+      leg.innerHTML='<span>Sol nu</span><div class="barre-leg barre-ndvi"></div><span>Végétation dense</span>';
+    }else{
+      if(coucheNdvi) map.removeLayer(coucheNdvi);
+      if(coucheAno) coucheAno.addTo(map);
+      leg.innerHTML='<span>Dégradation</span><div class="barre-leg barre-ano"></div><span>Amélioration</span>';
+    }
+  }
+</script>
+</body>
+</html>

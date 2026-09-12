@@ -1,0 +1,6 @@
+﻿cle-service.json
+*.json.json
+.venv/
+__pycache__/
+*.pyc
+.idea/

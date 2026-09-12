@@ -1,0 +1,14 @@
+# Ne jamais envoyer la cle du compte de service en ligne
+cle-service.json
+*.json.json
+
+# Fichiers de dev inutiles au deploiement
+.venv/
+__pycache__/
+*.pyc
+test_cle.py
+test_stats.html
+AgriScan_guide_prototype.docx
+sinfra_exemple.geojson
+.git/
+.idea/
