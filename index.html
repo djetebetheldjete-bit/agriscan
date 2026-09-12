@@ -254,6 +254,12 @@
             <span class="ico">💧</span><span id="alerteIrrigationTxt"></span>
           </div>
         </div>
+
+        <div class="panel" id="panelIrrigationGraph" style="margin-top:16px; display:none;">
+          <h3>Évolution hebdomadaire : besoin en eau vs pluie</h3>
+          <div class="sous">Barres = besoin d'irrigation · Ligne = pluie efficace reçue (mm/semaine)</div>
+          <div class="canvas-box"><canvas id="graphIrrigation"></canvas></div>
+        </div>
       </div>
 
       <div class="vide" id="etatVide">Délimite une parcelle sur la carte, puis lance une analyse. Les indicateurs et graphiques s'afficheront ici.</div>
@@ -269,7 +275,7 @@
 
   let coucheNdvi=null, coucheAno=null, coucheEau=null, coucheZone=null, zoneActive=null, marqueurLieu=null;
   let modeCarte='ndvi', granularite='mois';
-  let chartEvolution=null, chartDonut=null, chartBarres=null;
+  let chartEvolution=null, chartDonut=null, chartBarres=null, chartIrrigation=null;
   let derniereZonePourEvolution=null;
 
   const groupeDessin = new L.FeatureGroup();
@@ -370,6 +376,7 @@
     document.getElementById('blocStats').style.display='none';
     document.getElementById('blocGraphs').style.display='none';
     document.getElementById('blocIrrigation').style.display='none';
+    var pig=document.getElementById('panelIrrigationGraph'); if(pig) pig.style.display='none';
     document.getElementById('alerte').style.display='none';
     document.getElementById('etatVide').style.display='block';
     document.getElementById('enteteParcelle').innerHTML='<b>Aucune parcelle</b><span>Délimite une zone pour commencer</span>';
@@ -574,8 +581,42 @@
           basculerCarte('eau');  // affiche directement la carte de besoin en eau
         }
       }catch(e){ /* la carte est un bonus : on ignore si elle echoue */ }
+
+      // Graphique d'evolution hebdomadaire (besoin vs pluie)
+      try{
+        const corpsE=Object.assign(corpsRequete(), {
+          culture: document.getElementById('culture').value,
+          date_semis: document.getElementById('dateSemis').value
+        });
+        const repE=await fetch(API+'/irrigation_evolution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corpsE)});
+        const dataE=await repE.json();
+        if(!dataE.erreur && dataE.points && dataE.points.length){
+          majGraphIrrigation(dataE.points);
+        }
+      }catch(e){ /* graphique bonus : on ignore si echec */ }
     }catch(e){ afficherMsg('Impossible de joindre la passerelle.','err'); }
     btn.disabled=false;
+  }
+
+  function majGraphIrrigation(points){
+    document.getElementById('panelIrrigationGraph').style.display='block';
+    const labels=points.map(p=>p.semaine);
+    const besoin=points.map(p=>p.besoin);
+    const pluie=points.map(p=>p.pluie);
+    if(chartIrrigation) chartIrrigation.destroy();
+    chartIrrigation=new Chart(document.getElementById('graphIrrigation'),{
+      data:{ labels, datasets:[
+        { type:'bar', label:'Besoin irrigation (mm/sem)', data:besoin,
+          backgroundColor:'#2171b5', borderRadius:5, order:2 },
+        { type:'line', label:'Pluie efficace (mm/sem)', data:pluie,
+          borderColor:'#3B8C4E', backgroundColor:'rgba(59,140,78,.15)',
+          borderWidth:2, pointRadius:3, tension:.3, fill:true, order:1 }
+      ]},
+      options:{ responsive:true, maintainAspectRatio:false,
+        scales:{ y:{beginAtZero:true, title:{display:true,text:'mm / semaine'}},
+                 x:{ticks:{maxRotation:60,minRotation:0}} },
+        plugins:{ legend:{position:'bottom', labels:{boxWidth:12,font:{size:11}}} } }
+    });
   }
 
   // ===== Bascule de carte =====

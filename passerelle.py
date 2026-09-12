@@ -225,6 +225,30 @@ def calcul_et0_gee(zone, date_debut, date_fin):
     return col.map(et0_image).mean().clip(zone)
 
 
+
+def lire_et0_moyen(et0_img, zone):
+    """
+    Lit la valeur ET0 moyenne de facon ROBUSTE, meme pour de petites zones.
+    ERA5-Land a une resolution ~11 km : sur une petite parcelle, reduceRegion
+    peut ne rien capter. On essaie plusieurs echelles, puis on retombe sur le
+    centroide de la zone si necessaire.
+    """
+    for sc in (1000, 5000, 11132):
+        val = et0_img.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone,
+            scale=sc, maxPixels=1e9, bestEffort=True
+        ).get("ET0").getInfo()
+        if val is not None:
+            return val
+    # Dernier recours : valeur au centre de la parcelle
+    centre = zone.centroid(maxError=1)
+    val = et0_img.reduceRegion(
+        reducer=ee.Reducer.first(), geometry=centre,
+        scale=11132, maxPixels=1e9, bestEffort=True
+    ).get("ET0").getInfo()
+    return val
+
+
 @app.route("/irrigation", methods=["POST"])
 def calculer_irrigation():
     data = request.get_json()
@@ -255,9 +279,7 @@ def calculer_irrigation():
 
         # ET0 moyen (mm/j) sur la periode via GEE
         et0_img = calcul_et0_gee(zone, debut_dt.strftime("%Y-%m-%d"), date_fin)
-        et0_moy = et0_img.reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=zone, scale=1000, maxPixels=1e9, bestEffort=True
-        ).get("ET0").getInfo()
+        et0_moy = lire_et0_moyen(et0_img, zone)
 
         if et0_moy is None:
             return jsonify({"erreur": "Pas de donnees climatiques ERA5 sur cette periode/zone."}), 400
@@ -365,6 +387,94 @@ def carte_irrigation():
             "pluie_efficace_mm_j": round(pluie_eff_j, 2),
             "message": "Carte de besoin en eau calculee (Kc derive du NDVI)"
         })
+    except Exception as e:
+        return jsonify({"erreur": str(e)}), 500
+
+
+
+@app.route("/irrigation_evolution", methods=["POST"])
+def irrigation_evolution():
+    """
+    Evolution hebdomadaire du besoin en eau vs pluie recue.
+    Pour chaque semaine de la periode :
+      - ETc = ET0 (Penman-Monteith) x Kc (selon stade au milieu de la semaine)
+      - pluie = somme CHIRPS de la semaine
+      - besoin = max(ETc_semaine - pluie_efficace_semaine, 0)
+    Renvoie une liste [{semaine, etc, pluie, besoin}] en mm (cumul hebdo).
+    """
+    data = request.get_json()
+    zone, erreur = construire_zone(data)
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
+
+    culture = (data.get("culture") or "").lower()
+    if culture not in CULTURES:
+        return jsonify({"erreur": "Culture inconnue."}), 400
+    date_semis = data.get("date_semis")
+    if not date_semis:
+        return jsonify({"erreur": "Fournis la date de semis."}), 400
+
+    date_debut = data.get("date_debut", "2024-01-01")
+    date_fin = data.get("date_fin", "2024-12-31")
+
+    try:
+        from datetime import datetime, timedelta
+        debut = datetime.strptime(date_debut, "%Y-%m-%d")
+        fin = datetime.strptime(date_fin, "%Y-%m-%d")
+        semis = datetime.strptime(date_semis, "%Y-%m-%d")
+
+        points = []
+        semaine_debut = debut
+        # Limite de securite : max ~26 semaines pour eviter les calculs trop longs
+        max_semaines = 26
+        compteur = 0
+
+        while semaine_debut < fin and compteur < max_semaines:
+            semaine_fin = min(semaine_debut + timedelta(days=7), fin)
+            d1 = semaine_debut.strftime("%Y-%m-%d")
+            d2 = semaine_fin.strftime("%Y-%m-%d")
+            milieu = semaine_debut + timedelta(days=3)
+            jours_semis = (milieu - semis).days
+            kc, _ = kc_du_jour(culture, jours_semis)
+
+            # ET0 moyen (mm/j) sur la semaine -> cumul hebdo
+            try:
+                et0_img = calcul_et0_gee(zone, d1, d2)
+                et0_moy = lire_et0_moyen(et0_img, zone)
+            except Exception:
+                et0_moy = None
+
+            if et0_moy is None:
+                etc_hebdo = None
+            else:
+                nb_jours = (semaine_fin - semaine_debut).days
+                etc_hebdo = et0_moy * kc * nb_jours
+
+            # Pluie CHIRPS cumulee sur la semaine
+            chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+                      .filterDate(d1, d2).filterBounds(zone))
+            pluie = chirps.sum().reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=zone,
+                scale=5000, maxPixels=1e9, bestEffort=True
+            ).get("precipitation").getInfo() or 0
+            pluie_eff = pluie_efficace(pluie)
+
+            if etc_hebdo is None:
+                besoin = None
+            else:
+                besoin = max(etc_hebdo - pluie_eff, 0)
+
+            points.append({
+                "semaine": semaine_debut.strftime("%Y-%m-%d"),
+                "etc": round(etc_hebdo, 1) if etc_hebdo is not None else None,
+                "pluie": round(pluie_eff, 1),
+                "besoin": round(besoin, 1) if besoin is not None else None
+            })
+
+            semaine_debut = semaine_fin
+            compteur += 1
+
+        return jsonify({"points": points, "message": "Evolution irrigation calculee"})
     except Exception as e:
         return jsonify({"erreur": str(e)}), 500
 
