@@ -1,4 +1,4 @@
-# passerelle.py — Passerelle AgriScan
+# passerelle.py — Passerelle Vertea
 # Routes :
 #   - /            : sert la page web (index.html)
 #   - /ndvi        : carte NDVI + NDVI moyen + surface + repartition sain/moyen/faible
