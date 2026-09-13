@@ -107,6 +107,18 @@
 
   .vide{ background:var(--carte); border:1px dashed var(--bord); border-radius:14px; padding:40px 20px; text-align:center; color:var(--gris); font-size:13.5px; }
 
+  /* Cartes de verdict plantation */
+  .verdict{ background:#fff; border:1px solid var(--bord); border-radius:12px; padding:13px 15px; margin-bottom:10px; border-left:5px solid var(--bord); }
+  .verdict.fav{ border-left-color:var(--sain); }
+  .verdict.prec{ border-left-color:var(--moyen); }
+  .verdict.dec{ border-left-color:var(--faible); }
+  .verdict .tete{ display:flex; justify-content:space-between; align-items:center; }
+  .verdict .nom{ font-size:15px; font-weight:800; text-transform:capitalize; }
+  .verdict .badge{ font-size:11.5px; font-weight:700; padding:4px 11px; border-radius:20px; color:#fff; }
+  .badge.fav{ background:var(--sain); } .badge.prec{ background:var(--moyen); } .badge.dec{ background:var(--faible); }
+  .verdict ul{ font-size:12.5px; color:var(--gris); margin:8px 0 0 18px; }
+  .verdict .note{ font-size:12px; color:#98a29c; font-style:italic; margin-top:6px; }
+
   @media (max-width:860px){
     .app{ grid-template-columns:1fr; }
     .panneau{ border-right:none; border-bottom:1px solid var(--bord); }
@@ -170,6 +182,14 @@
         <input type="date" id="dateSemis" value="2024-09-01">
         <button class="btn ligne2" id="btnIrrigation" onclick="analyserIrrigation()">Calculer le besoin en eau</button>
         <div class="astuce">Méthode FAO-56 (Penman-Monteith + coefficient cultural), pluie CHIRPS.</div>
+      </div>
+
+      <div class="groupe">
+        <div class="titre">Conseil de plantation</div>
+        <label>Date de référence</label>
+        <input type="date" id="datePlantation" value="2024-12-15">
+        <button class="btn ligne2" id="btnPlantation" onclick="analyserPlantation()">Quoi planter maintenant ?</button>
+        <div class="astuce">Croise température (ERA5) et pluie (CHIRPS) avec les exigences des cultures maraîchères.</div>
       </div>
     </aside>
 
@@ -259,6 +279,19 @@
           <h3>Évolution hebdomadaire : besoin en eau vs pluie</h3>
           <div class="sous">Barres = besoin d'irrigation · Ligne = pluie efficace reçue (mm/semaine)</div>
           <div class="canvas-box"><canvas id="graphIrrigation"></canvas></div>
+        </div>
+      </div>
+
+      <!-- Conseil de plantation -->
+      <div id="blocPlantation" style="display:none; margin-top:16px;">
+        <div class="panel">
+          <div class="ligne-titre">
+            <div>
+              <h3>🌱 Conseil de plantation</h3>
+              <div class="sous" id="sousPlantation">Cultures adaptées aux conditions actuelles</div>
+            </div>
+          </div>
+          <div id="listePlantation"></div>
         </div>
       </div>
 
@@ -377,6 +410,7 @@
     document.getElementById('blocGraphs').style.display='none';
     document.getElementById('blocIrrigation').style.display='none';
     var pig=document.getElementById('panelIrrigationGraph'); if(pig) pig.style.display='none';
+    var bp=document.getElementById('blocPlantation'); if(bp) bp.style.display='none';
     document.getElementById('alerte').style.display='none';
     document.getElementById('etatVide').style.display='block';
     document.getElementById('enteteParcelle').innerHTML='<b>Aucune parcelle</b><span>Délimite une zone pour commencer</span>';
@@ -617,6 +651,42 @@
                  x:{ticks:{maxRotation:60,minRotation:0}} },
         plugins:{ legend:{position:'bottom', labels:{boxWidth:12,font:{size:11}}} } }
     });
+  }
+
+  // ===== Conseil de plantation =====
+  async function analyserPlantation(){
+    if(!zoneActive){ afficherMsg('Délimite ou importe d\'abord une zone.','err'); return; }
+    const btn=document.getElementById('btnPlantation'); btn.disabled=true;
+    afficherMsg('Analyse des cultures adaptées (ERA5 + CHIRPS)… 15-40 s.','info');
+    try{
+      const corps=Object.assign(corpsRequete(), {
+        date_ref: document.getElementById('datePlantation').value
+      });
+      const rep=await fetch(API+'/plantation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corps)});
+      const data=await rep.json();
+      if(data.erreur){ afficherMsg('Erreur : '+data.erreur,'err'); btn.disabled=false; return; }
+
+      document.getElementById('etatVide').style.display='none';
+      document.getElementById('blocPlantation').style.display='block';
+      document.getElementById('sousPlantation').textContent=
+        'Mois : '+data.mois+' · Température '+(data.temperature_moy ?? '?')+'°C · Pluie ~90j : '+(data.pluie_cycle_mm ?? '?')+' mm';
+
+      const cl = v => v==='Favorable'?'fav':(v==='Deconseille'?'dec':'prec');
+      const cont=document.getElementById('listePlantation');
+      cont.innerHTML='';
+      data.cultures.forEach(c=>{
+        const k=cl(c.verdict);
+        const div=document.createElement('div');
+        div.className='verdict '+k;
+        div.innerHTML='<div class="tete"><span class="nom">'+c.culture+'</span>'
+          +'<span class="badge '+k+'">'+c.verdict+'</span></div>'
+          +'<ul>'+c.raisons.map(r=>'<li>'+r+'</li>').join('')+'</ul>'
+          +'<div class="note">'+c.note+'</div>';
+        cont.appendChild(div);
+      });
+      afficherMsg('Conseil de plantation calculé.','ok');
+    }catch(e){ afficherMsg('Impossible de joindre la passerelle.','err'); }
+    btn.disabled=false;
   }
 
   // ===== Bascule de carte =====

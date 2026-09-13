@@ -479,6 +479,182 @@ def irrigation_evolution():
         return jsonify({"erreur": str(e)}), 500
 
 
+
+# ======================================================================
+#  CONSEIL DE PLANTATION — croise conditions reelles (ERA5/CHIRPS)
+#  avec les exigences agronomiques (fiche technique Cote d'Ivoire)
+# ======================================================================
+
+# Exigences par culture (source : fiche technique agronomique CI)
+#   t_min, t_max      : plage de temperature ideale (degC)
+#   t_critique        : au-dela, avortement/stress fort
+#   eau_min, eau_max  : besoin en eau par cycle (mm)
+#   mois_semis        : liste des mois favorables au semis (1=janvier ... 12=decembre)
+#   note              : specificite locale a rappeler
+EXIGENCES = {
+    "concombre": {
+        "t_min": 24, "t_max": 30, "t_critique": 35,
+        "eau_min": 400, "eau_max": 600,
+        "mois_semis": [10, 11, 12, 1, 2, 5, 6],
+        "note": "Arrosage tres regulier. Surveiller le mildiou en saison des pluies."
+    },
+    "piment": {
+        "t_min": 20, "t_max": 30, "t_critique": 32,
+        "eau_min": 500, "eau_max": 800,
+        "mois_semis": [9, 10, 2, 3],
+        "note": "Sensible a l'exces d'eau (billons draines). Floraison exige des temperatures douces."
+    },
+    "tomate": {
+        "t_min": 18, "t_max": 27, "t_critique": 32,
+        "eau_min": 500, "eau_max": 700,
+        "mois_semis": [10, 11, 12, 1],
+        "note": "Nuits < 22 degC requises. Eviter la saison humide (mildiou, fletrissement, viroses)."
+    },
+    "laitue": {
+        "t_min": 15, "t_max": 24, "t_critique": 28,
+        "eau_min": 300, "eau_max": 400,
+        "mois_semis": [11, 12, 1, 2],
+        "note": "Enracinement superficiel, arrosages frequents. Montaison si trop chaud : variete thermotolerante + ombriere."
+    },
+}
+
+MOIS_FR = {1:"janvier",2:"fevrier",3:"mars",4:"avril",5:"mai",6:"juin",
+           7:"juillet",8:"aout",9:"septembre",10:"octobre",11:"novembre",12:"decembre"}
+
+
+def lire_valeur_moyenne(image, zone, bande):
+    """Lecture robuste (multi-echelle + centroide) d'une bande d'une image ERA5/CHIRPS."""
+    for sc in (1000, 5000, 11132):
+        val = image.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone,
+            scale=sc, maxPixels=1e9, bestEffort=True
+        ).get(bande).getInfo()
+        if val is not None:
+            return val
+    centre = zone.centroid(maxError=1)
+    return image.reduceRegion(
+        reducer=ee.Reducer.first(), geometry=centre,
+        scale=11132, maxPixels=1e9, bestEffort=True
+    ).get(bande).getInfo()
+
+
+def evaluer_culture(nom, temp_moy, pluie_cycle, mois):
+    """Renvoie un verdict pour une culture selon les conditions reelles."""
+    e = EXIGENCES[nom]
+    raisons = []
+    score = 0  # 2 = favorable, 1 = precautions, 0 = deconseille
+
+    # --- Critere temperature ---
+    if temp_moy is None:
+        raisons.append("temperature indisponible")
+    elif temp_moy > e["t_critique"]:
+        raisons.append(f"temperature trop elevee ({temp_moy:.1f}degC > seuil critique {e['t_critique']}degC)")
+        score_temp = 0
+    elif e["t_min"] <= temp_moy <= e["t_max"]:
+        raisons.append(f"temperature ideale ({temp_moy:.1f}degC)")
+        score_temp = 2
+    else:
+        raisons.append(f"temperature acceptable mais hors plage ideale ({temp_moy:.1f}degC)")
+        score_temp = 1
+
+    # --- Critere saison de semis ---
+    if mois in e["mois_semis"]:
+        raisons.append(f"periode de semis favorable ({MOIS_FR[mois]})")
+        score_saison = 2
+    else:
+        favs = ", ".join(MOIS_FR[m] for m in e["mois_semis"])
+        raisons.append(f"hors periode optimale (conseille : {favs})")
+        score_saison = 0
+
+    # --- Critere eau (pluie sur le cycle vs besoin) ---
+    if pluie_cycle is None:
+        score_eau = 1
+    elif pluie_cycle >= e["eau_min"]:
+        raisons.append(f"pluie suffisante sur le cycle (~{pluie_cycle:.0f} mm)")
+        score_eau = 2
+    elif pluie_cycle >= e["eau_min"] * 0.5:
+        raisons.append(f"pluie partielle (~{pluie_cycle:.0f} mm), irrigation d'appoint necessaire")
+        score_eau = 1
+    else:
+        raisons.append(f"pluie faible (~{pluie_cycle:.0f} mm), forte irrigation requise")
+        score_eau = 1  # pas eliminatoire si on peut irriguer
+
+    # --- Verdict global : la temperature et la saison priment ---
+    if temp_moy is not None and temp_moy > e["t_critique"]:
+        verdict = "Deconseille"
+    elif score_saison == 0:
+        verdict = "Possible avec precautions"
+    elif score_temp == 2 and score_saison == 2:
+        verdict = "Favorable"
+    else:
+        verdict = "Possible avec precautions"
+
+    return {
+        "culture": nom,
+        "verdict": verdict,
+        "temperature_moy": round(temp_moy, 1) if temp_moy is not None else None,
+        "pluie_cycle_mm": round(pluie_cycle, 0) if pluie_cycle is not None else None,
+        "raisons": raisons,
+        "note": e["note"]
+    }
+
+
+@app.route("/plantation", methods=["POST"])
+def conseil_plantation():
+    """
+    Conseille les cultures a planter selon les conditions reelles de la zone
+    a la date choisie (temperature ERA5, pluie CHIRPS) croisees avec la fiche.
+    """
+    data = request.get_json()
+    zone, erreur = construire_zone(data)
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
+
+    # Date de reference (par defaut : date_fin)
+    date_ref = data.get("date_ref") or data.get("date_fin", "2024-12-31")
+
+    try:
+        from datetime import datetime, timedelta
+        ref = datetime.strptime(date_ref, "%Y-%m-%d")
+        mois = ref.month
+
+        # Temperature moyenne (ERA5) sur les 30 derniers jours
+        d1 = (ref - timedelta(days=30)).strftime("%Y-%m-%d")
+        d2 = ref.strftime("%Y-%m-%d")
+        col = (ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR")
+               .filterDate(d1, d2).filterBounds(zone))
+        # temperature_2m en Kelvin -> Celsius (moyenne de la periode)
+        temp_img = col.select("temperature_2m").mean().subtract(273.15)
+        temp_moy = lire_valeur_moyenne(temp_img, zone, "temperature_2m")
+
+        # Pluie CHIRPS estimee sur un cycle (~90 jours) autour de la date
+        dc1 = (ref - timedelta(days=45)).strftime("%Y-%m-%d")
+        dc2 = (ref + timedelta(days=45)).strftime("%Y-%m-%d")
+        chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+                  .filterDate(dc1, dc2).filterBounds(zone))
+        pluie_cycle = chirps.sum().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone,
+            scale=5000, maxPixels=1e9, bestEffort=True
+        ).get("precipitation").getInfo()
+
+        # Evaluer chaque culture
+        resultats = [evaluer_culture(nom, temp_moy, pluie_cycle, mois)
+                     for nom in EXIGENCES]
+        # Trier : Favorable d'abord, puis precautions, puis deconseille
+        ordre = {"Favorable": 0, "Possible avec precautions": 1, "Deconseille": 2}
+        resultats.sort(key=lambda r: ordre.get(r["verdict"], 3))
+
+        return jsonify({
+            "mois": MOIS_FR[mois],
+            "temperature_moy": round(temp_moy, 1) if temp_moy is not None else None,
+            "pluie_cycle_mm": round(pluie_cycle, 0) if pluie_cycle is not None else None,
+            "cultures": resultats,
+            "message": "Conseil de plantation calcule"
+        })
+    except Exception as e:
+        return jsonify({"erreur": str(e)}), 500
+
+
 # ===== Page web =====
 @app.route("/", methods=["GET"])
 def accueil():
