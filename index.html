@@ -13,19 +13,19 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root{
-    --vert:#0F6E56; --vert-profond:#0A4E3D; --vert-clair:#E5F0EA;
-    --fond:#F6F8F5; --carte:#FFFFFF; --encre:#1A2420; --gris:#6B7B73; --bord:#E1E8E3;
-    --sain:#3B8C4E; --moyen:#D9A441; --faible:#C0492E;
+    --vert:#2DD4A0; --vert-profond:#14201C; --vert-clair:#2A3B35;
+    --fond:#1B2925; --carte:#243530; --encre:#EAF2EE; --gris:#8FA89F; --bord:#31463F;
+    --sain:#2DD4A0; --moyen:#E0B44A; --faible:#E07856;
   }
   *{ margin:0; padding:0; box-sizing:border-box; }
   body{ font-family:'Inter',system-ui,sans-serif; background:var(--fond); color:var(--encre); font-size:14px; line-height:1.5; }
   .num{ font-variant-numeric:tabular-nums; }
 
   /* Barre du haut */
-  .topbar{ background:var(--vert-profond); color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; }
-  .topbar .logo{ font-weight:800; font-size:18px; letter-spacing:-0.3px; display:flex; align-items:center; gap:9px; }
-  .topbar .parcelle{ margin-left:auto; text-align:right; font-size:13px; opacity:.92; }
-  .topbar .parcelle b{ font-size:16px; display:block; font-weight:700; }
+  .topbar{ background:var(--vert-profond); color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; border-bottom:1px solid var(--bord); }
+  .topbar .logo{ font-weight:800; font-size:18px; letter-spacing:-0.3px; display:flex; align-items:center; gap:9px; color:var(--vert); }
+  .topbar .parcelle{ margin-left:auto; text-align:right; font-size:13px; color:var(--gris); }
+  .topbar .parcelle b{ font-size:16px; display:block; font-weight:700; color:var(--encre); }
 
   /* Disposition tableau de bord */
   .app{ display:grid; grid-template-columns:320px 1fr; gap:0; min-height:calc(100vh - 56px); }
@@ -34,9 +34,15 @@
 
   .groupe{ margin-bottom:20px; }
   .groupe > .titre{ font-size:12px; font-weight:700; color:var(--vert); margin-bottom:9px; }
+
+  /* Onglets du panneau */
+  .onglets-panneau{ display:flex; gap:4px; background:var(--fond); padding:4px; border-radius:10px; margin-bottom:16px; }
+  .onglet-p{ flex:1; padding:8px 6px; border:none; background:none; border-radius:7px; font-size:12.5px; font-weight:600; color:var(--gris); cursor:pointer; font-family:inherit; transition:all .15s; }
+  .onglet-p.actif{ background:var(--vert); color:#0a1512; }
+  .module{ margin-bottom:20px; }
   label{ font-size:12px; font-weight:600; color:var(--gris); display:block; margin-bottom:4px; }
   input[type=text], input[type=date], input[type=number], select{
-    width:100%; padding:9px 11px; border:1px solid var(--bord); border-radius:9px; font-size:13px; font-family:inherit; background:#fff; color:var(--encre);
+    width:100%; padding:9px 11px; border:1px solid var(--bord); border-radius:9px; font-size:13px; font-family:inherit; background:var(--fond); color:var(--encre);
   }
   input:focus, select:focus{ outline:2px solid var(--vert); outline-offset:1px; border-color:var(--vert); }
   .duo{ display:flex; gap:8px; }
@@ -46,12 +52,12 @@
   .btn:hover{ background:var(--vert-profond); }
   .btn:disabled{ opacity:.5; cursor:wait; }
   .btn.ligne2{ margin-top:8px; }
-  .btn.clair{ background:#eef2ef; color:var(--encre); }
+  .btn.clair{ background:var(--vert-clair); color:var(--encre); }
   .btn.clair:hover{ background:#e2e9e4; }
   .btn.import{ display:block; text-align:center; margin-top:8px; }
 
   .astuce{ font-size:12px; color:var(--gris); margin-top:8px; line-height:1.45; }
-  .resultats{ background:#fff; border:1px solid var(--bord); border-radius:9px; margin-top:6px; overflow:hidden; display:none; }
+  .resultats{ background:var(--carte); border:1px solid var(--bord); border-radius:9px; margin-top:6px; overflow:hidden; display:none; }
   .resultats div{ padding:9px 11px; font-size:12.5px; cursor:pointer; border-bottom:1px solid var(--bord); }
   .resultats div:last-child{ border-bottom:none; }
   .resultats div:hover{ background:var(--vert-clair); }
@@ -61,7 +67,7 @@
   .carte-tete{ display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--bord); flex-wrap:wrap; }
   .onglets{ display:flex; gap:4px; background:var(--fond); padding:3px; border-radius:9px; }
   .onglet{ padding:7px 14px; border-radius:7px; font-size:12.5px; font-weight:600; cursor:pointer; color:var(--gris); border:none; background:none; font-family:inherit; }
-  .onglet.actif{ background:#fff; color:var(--vert); box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .onglet.actif{ background:var(--carte); color:var(--vert); }
   .legende{ margin-left:auto; display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--gris); }
   .barre-leg{ width:120px; height:9px; border-radius:5px; }
   .barre-ndvi{ background:linear-gradient(90deg,#a52a2a,#d9a441,#ffff99,#97c459,#3b6d11,#173404); }
@@ -96,19 +102,19 @@
   .mini-canvas{ position:relative; height:180px; }
   .granularite{ display:flex; gap:4px; background:var(--fond); padding:3px; border-radius:8px; margin-left:auto; }
   .granularite button{ padding:5px 12px; border:none; background:none; border-radius:6px; font-size:12px; font-weight:600; color:var(--gris); cursor:pointer; font-family:inherit; }
-  .granularite button.actif{ background:#fff; color:var(--vert); box-shadow:0 1px 2px rgba(0,0,0,.08); }
+  .granularite button.actif{ background:var(--carte); color:var(--vert); }
   .ligne-titre{ display:flex; align-items:center; gap:10px; margin-bottom:12px; }
   .ligne-titre h3{ margin:0; } .ligne-titre .sous{ margin:0; }
 
   .msg{ font-size:12.5px; padding:9px 12px; border-radius:8px; margin-bottom:14px; display:none; }
   .msg.ok{ background:var(--vert-clair); color:var(--vert-profond); display:block; }
   .msg.err{ background:#fbeae6; color:#8f3120; display:block; }
-  .msg.info{ background:#eef2ef; color:var(--gris); display:block; }
+  .msg.info{ background:var(--vert-clair); color:var(--encre); display:block; }
 
   .vide{ background:var(--carte); border:1px dashed var(--bord); border-radius:14px; padding:40px 20px; text-align:center; color:var(--gris); font-size:13.5px; }
 
   /* Cartes de verdict plantation */
-  .verdict{ background:#fff; border:1px solid var(--bord); border-radius:12px; padding:13px 15px; margin-bottom:10px; border-left:5px solid var(--bord); }
+  .verdict{ background:var(--carte); border:1px solid var(--bord); border-radius:12px; padding:13px 15px; margin-bottom:10px; border-left:5px solid var(--bord); }
   .verdict.fav{ border-left-color:var(--sain); }
   .verdict.prec{ border-left-color:var(--moyen); }
   .verdict.dec{ border-left-color:var(--faible); }
@@ -159,18 +165,23 @@
         <div class="astuce">Utilise les outils de dessin sur la carte (rectangle ou polygone), ou importe un fichier.</div>
         <label class="btn clair import" for="fichierGeojson">Importer un GeoJSON</label>
         <input type="file" id="fichierGeojson" accept=".geojson,.json" style="display:none" onchange="importerGeojson(event)">
-      </div>
-
-      <div class="groupe">
-        <div class="titre">Analyser</div>
-        <button class="btn" id="btnNdvi" onclick="analyser()">Analyser la santé (NDVI)</button>
-        <button class="btn clair ligne2" id="btnEvolution" onclick="analyserEvolution()">Calculer l'évolution</button>
-        <button class="btn clair ligne2" id="btnAnomalie" onclick="analyserAnomalie()">Détecter les changements</button>
         <button class="btn clair ligne2" onclick="effacerZone()">Effacer la zone</button>
       </div>
 
-      <div class="groupe">
-        <div class="titre">Irrigation (besoin en eau)</div>
+      <div class="onglets-panneau">
+        <button class="onglet-p actif" id="opVeg" onclick="ongletPanneau('veg')">Végétation</button>
+        <button class="onglet-p" id="opEau" onclick="ongletPanneau('eau')">Irrigation</button>
+        <button class="onglet-p" id="opPlant" onclick="ongletPanneau('plant')">Plantation</button>
+      </div>
+
+      <div class="module" id="moduleVeg">
+        <button class="btn" id="btnNdvi" onclick="analyser()">Analyser la santé (NDVI)</button>
+        <button class="btn clair ligne2" id="btnEvolution" onclick="analyserEvolution()">Calculer l'évolution</button>
+        <button class="btn clair ligne2" id="btnAnomalie" onclick="analyserAnomalie()">Détecter les changements</button>
+        <div class="astuce">Indice de végétation NDVI (Sentinel-2), évolution dans le temps et détection de changements.</div>
+      </div>
+
+      <div class="module" id="moduleEau" style="display:none;">
         <label>Culture</label>
         <select id="culture">
           <option value="tomate">Tomate</option>
@@ -184,8 +195,7 @@
         <div class="astuce">Méthode FAO-56 (Penman-Monteith + coefficient cultural), pluie CHIRPS.</div>
       </div>
 
-      <div class="groupe">
-        <div class="titre">Conseil de plantation</div>
+      <div class="module" id="modulePlant" style="display:none;">
         <label>Date de référence</label>
         <input type="date" id="datePlantation" value="2024-12-15">
         <button class="btn ligne2" id="btnPlantation" onclick="analyserPlantation()">Quoi planter maintenant ?</button>
@@ -300,6 +310,16 @@
   </div>
 
 <script>
+  // Bascule des onglets du panneau (Vegetation / Irrigation / Plantation)
+  function ongletPanneau(mod){
+    document.getElementById('opVeg').classList.toggle('actif', mod==='veg');
+    document.getElementById('opEau').classList.toggle('actif', mod==='eau');
+    document.getElementById('opPlant').classList.toggle('actif', mod==='plant');
+    document.getElementById('moduleVeg').style.display   = (mod==='veg')   ? 'block' : 'none';
+    document.getElementById('moduleEau').style.display   = (mod==='eau')   ? 'block' : 'none';
+    document.getElementById('modulePlant').style.display = (mod==='plant') ? 'block' : 'none';
+  }
+
   // L'API est servie par la meme origine que la page (local ou en ligne).
   // En local si on ouvre le fichier directement (protocol file:), on retombe sur 127.0.0.1:5000.
   const API = (location.protocol === 'file:') ? 'http://127.0.0.1:5000' : location.origin;

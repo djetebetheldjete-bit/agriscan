@@ -270,31 +270,47 @@ def calculer_irrigation():
     try:
         from datetime import datetime, timedelta
         fin_dt = datetime.strptime(date_fin, "%Y-%m-%d")
-        debut_dt = fin_dt - timedelta(days=7)
         semis_dt = datetime.strptime(date_semis, "%Y-%m-%d")
         jours_semis = (fin_dt - semis_dt).days
 
         # Kc selon le stade
         kc, stade = kc_du_jour(culture, jours_semis)
 
-        # ET0 moyen (mm/j) sur la periode via GEE
+        # ET0 : on cherche les images ERA5 DISPONIBLES dans une fenetre elargie
+        # (60 jours avant date_fin). Si fin decembre manque, on prend ce qui existe.
+        debut_dt = fin_dt - timedelta(days=60)
+        col_test = (ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR")
+                    .filterDate(debut_dt.strftime("%Y-%m-%d"), date_fin)
+                    .filterBounds(zone))
+        n_images = col_test.size().getInfo()
+        if n_images == 0:
+            return jsonify({"erreur": "Aucune donnee ERA5 disponible pour cette periode. "
+                                      "ERA5 a un delai de mise a jour : choisis une periode "
+                                      "d'il y a au moins 1 a 2 mois (ex. fin en 2024)."}), 400
+
+        # ET0 moyen (mm/j) sur les images disponibles
         et0_img = calcul_et0_gee(zone, debut_dt.strftime("%Y-%m-%d"), date_fin)
-        et0_moy = lire_et0_moyen(et0_img, zone)
+        try:
+            et0_moy = lire_et0_moyen(et0_img, zone)
+        except Exception as e_et0:
+            return jsonify({"erreur": "Calcul ET0 echoue : " + str(e_et0)}), 500
 
         if et0_moy is None:
-            return jsonify({"erreur": "Pas de donnees climatiques ERA5 sur cette periode/zone."}), 400
+            return jsonify({"erreur": "ET0 introuvable (aucune image ERA5 captee sur cette zone/periode)."}), 400
 
         # ETc = ET0 x Kc
         etc = et0_moy * kc
 
-        # Pluie CHIRPS (mm) moyenne journaliere sur la periode
+        # Pluie CHIRPS (mm) moyenne journaliere sur la meme fenetre
         chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                   .filterDate(debut_dt.strftime("%Y-%m-%d"), date_fin)
                   .filterBounds(zone))
+        n_pluie = chirps.size().getInfo()
         pluie_tot = chirps.sum().reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone, scale=5000, maxPixels=1e9, bestEffort=True
         ).get("precipitation").getInfo() or 0
-        pluie_jour = pluie_tot / 7.0  # moyenne journaliere
+        # moyenne journaliere sur le nombre de jours reels (evite division par 7 fixe)
+        pluie_jour = (pluie_tot / n_pluie) if n_pluie and n_pluie > 0 else 0
 
         pluie_eff = pluie_efficace(pluie_jour)
 
