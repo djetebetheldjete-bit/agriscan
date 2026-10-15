@@ -63,7 +63,32 @@ def construire_zone(data):
     return None, "Zone invalide. Envoie un 'bbox' [ouest, sud, est, nord] ou un 'polygon' [[lng,lat],...]."
 
 
-def collection_ndvi(zone, date_debut, date_fin):
+def lire_cle(resultat_reduce, cle, defaut=None):
+    """
+    Lit une cle d'un ee.Dictionary (resultat d'un reduceRegion) SANS planter.
+    Important : on fait .getInfo() sur TOUT le dictionnaire puis on lit la cle cote
+    Python. Appeler .get('NDVI') directement sur l'ee.Dictionary leve l'erreur
+    'Dictionary does not contain key' quand la bande est absente (petite parcelle,
+    image vide, nuages). Ici on renvoie simplement le defaut dans ce cas.
+    """
+    try:
+        d = resultat_reduce.getInfo() or {}
+    except Exception:
+        return defaut
+    v = d.get(cle)
+    return v if v is not None else defaut
+
+
+def zone_avec_marge(zone, metres=20):
+    """Tampon leger autour de la zone : garantit qu'au moins un pixel est couvert
+    meme pour une toute petite parcelle (plus petite qu'un pixel satellite)."""
+    try:
+        return zone.buffer(metres)
+    except Exception:
+        return zone
+
+
+def collection_ndvi(zone, date_debut, date_fin, seuil_nuages=20):
     """Collection Sentinel-2 filtree, avec bande NDVI ajoutee."""
     def ajouter_ndvi(image):
         ndvi = image.normalizedDifference(["B8", "B4"]).rename("NDVI")
@@ -71,8 +96,46 @@ def collection_ndvi(zone, date_debut, date_fin):
     return (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(zone)
             .filterDate(date_debut, date_fin)
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", seuil_nuages))
             .map(ajouter_ndvi))
+
+
+def collection_ndvi_robuste(zone, date_debut, date_fin):
+    """
+    Trouve des images NDVI nettes meme quand la fenetre demandee est vide
+    (petite zone, periode courte, beaucoup de nuages). On elargit progressivement :
+      1) fenetre demandee, nuages < 20 %
+      2) on recule le debut jusqu'a 120 jours avant la fin
+      3) on relache le seuil de nuages (40 % puis 60 %)
+    Renvoie (collection, info) ou (None, message) si vraiment rien n'est captable.
+    """
+    from datetime import datetime, timedelta
+    try:
+        fin_dt = datetime.strptime(date_fin[:10], "%Y-%m-%d")
+    except Exception:
+        fin_dt = None
+
+    essais = [(date_debut, 20)]
+    if fin_dt is not None:
+        for recul in (60, 120):
+            d = (fin_dt - timedelta(days=recul)).strftime("%Y-%m-%d")
+            essais.append((d, 20))
+        for recul in (90, 150):
+            d = (fin_dt - timedelta(days=recul)).strftime("%Y-%m-%d")
+            essais.append((d, 40))
+            essais.append((d, 60))
+
+    for d_debut, seuil in essais:
+        col = collection_ndvi(zone, d_debut, date_fin, seuil_nuages=seuil)
+        try:
+            n = col.size().getInfo()
+        except Exception:
+            n = 0
+        if n and n > 0:
+            return col, {"images": n, "depuis": d_debut, "nuages_max": seuil}
+    return None, ("Aucune image satellite nette (Sentinel-2) sur cette parcelle, meme en "
+                  "elargissant la periode et en tolerant plus de nuages. Reessaie avec une "
+                  "parcelle un peu plus grande ou une autre periode.")
 
 
 def calculer_stats(ndvi_image, zone):
@@ -80,10 +143,10 @@ def calculer_stats(ndvi_image, zone):
     classe = (ndvi_image.gte(SEUIL_FAIBLE)
               .add(ndvi_image.gte(SEUIL_SAIN))
               .rename("classe"))
-    histo = classe.reduceRegion(
+    histo = lire_cle(classe.reduceRegion(
         reducer=ee.Reducer.frequencyHistogram(),
         geometry=zone, scale=10, maxPixels=1e9, bestEffort=True
-    ).get("classe").getInfo() or {}
+    ), "classe", {}) or {}
 
     n_faible = histo.get("0", 0); n_moyen = histo.get("1", 0); n_sain = histo.get("2", 0)
     total = n_faible + n_moyen + n_sain
@@ -111,24 +174,125 @@ import math as _math
 
 # --- Coefficients culturaux Kc (FAO-56) et durees de phases (jours) ---
 # Phases : initiale, developpement, mi-saison, fin
+# Source : FAO-56 (Tables 11 & 12). Valeurs arrondies, adaptees au climat tropical
+# de Cote d'Ivoire. Pour les perennes (cacao, cafe, palmier...), Kc est pris ~constant.
 CULTURES = {
-    "tomate":    {"kc_ini": 0.60, "kc_mid": 1.15, "kc_end": 0.80,
-                  "d_ini": 30, "d_dev": 40, "d_mid": 40, "d_fin": 25},
-    "concombre": {"kc_ini": 0.60, "kc_mid": 1.00, "kc_end": 0.75,
-                  "d_ini": 20, "d_dev": 30, "d_mid": 40, "d_fin": 15},
-    "piment":    {"kc_ini": 0.60, "kc_mid": 1.05, "kc_end": 0.90,
-                  "d_ini": 30, "d_dev": 35, "d_mid": 40, "d_fin": 20},
-    "laitue":    {"kc_ini": 0.70, "kc_mid": 1.00, "kc_end": 0.95,
-                  "d_ini": 20, "d_dev": 30, "d_mid": 15, "d_fin": 10},
+    # --- Maraichage ---
+    "tomate":    {"kc_ini": 0.60, "kc_mid": 1.15, "kc_end": 0.80, "d_ini": 30, "d_dev": 40, "d_mid": 40, "d_fin": 25},
+    "concombre": {"kc_ini": 0.60, "kc_mid": 1.00, "kc_end": 0.75, "d_ini": 20, "d_dev": 30, "d_mid": 40, "d_fin": 15},
+    "piment":    {"kc_ini": 0.60, "kc_mid": 1.05, "kc_end": 0.90, "d_ini": 30, "d_dev": 35, "d_mid": 40, "d_fin": 20},
+    "poivron":   {"kc_ini": 0.60, "kc_mid": 1.05, "kc_end": 0.90, "d_ini": 30, "d_dev": 35, "d_mid": 40, "d_fin": 20},
+    "laitue":    {"kc_ini": 0.70, "kc_mid": 1.00, "kc_end": 0.95, "d_ini": 20, "d_dev": 30, "d_mid": 15, "d_fin": 10},
+    "chou":      {"kc_ini": 0.70, "kc_mid": 1.05, "kc_end": 0.95, "d_ini": 40, "d_dev": 60, "d_mid": 50, "d_fin": 15},
+    "carotte":   {"kc_ini": 0.70, "kc_mid": 1.05, "kc_end": 0.95, "d_ini": 20, "d_dev": 30, "d_mid": 50, "d_fin": 20},
+    "oignon":    {"kc_ini": 0.70, "kc_mid": 1.05, "kc_end": 0.75, "d_ini": 15, "d_dev": 25, "d_mid": 70, "d_fin": 40},
+    "aubergine": {"kc_ini": 0.60, "kc_mid": 1.05, "kc_end": 0.90, "d_ini": 30, "d_dev": 40, "d_mid": 40, "d_fin": 20},
+    "gombo":     {"kc_ini": 0.60, "kc_mid": 1.10, "kc_end": 0.90, "d_ini": 25, "d_dev": 35, "d_mid": 40, "d_fin": 20},
+    "epinard":   {"kc_ini": 0.70, "kc_mid": 1.00, "kc_end": 0.95, "d_ini": 20, "d_dev": 20, "d_mid": 15, "d_fin": 5},
+    "courgette": {"kc_ini": 0.50, "kc_mid": 1.00, "kc_end": 0.80, "d_ini": 25, "d_dev": 35, "d_mid": 25, "d_fin": 15},
+    "pasteque":  {"kc_ini": 0.40, "kc_mid": 1.00, "kc_end": 0.75, "d_ini": 20, "d_dev": 30, "d_mid": 30, "d_fin": 30},
+    "melon":     {"kc_ini": 0.50, "kc_mid": 1.05, "kc_end": 0.75, "d_ini": 25, "d_dev": 35, "d_mid": 40, "d_fin": 20},
+    "haricot vert": {"kc_ini": 0.50, "kc_mid": 1.05, "kc_end": 0.90, "d_ini": 20, "d_dev": 30, "d_mid": 30, "d_fin": 10},
+    # --- Legumineuses & grandes cultures ---
+    "arachide":  {"kc_ini": 0.40, "kc_mid": 1.15, "kc_end": 0.60, "d_ini": 25, "d_dev": 35, "d_mid": 45, "d_fin": 25},
+    "niebe":     {"kc_ini": 0.40, "kc_mid": 1.05, "kc_end": 0.60, "d_ini": 20, "d_dev": 30, "d_mid": 30, "d_fin": 20},
+    "soja":      {"kc_ini": 0.40, "kc_mid": 1.15, "kc_end": 0.50, "d_ini": 20, "d_dev": 35, "d_mid": 60, "d_fin": 25},
+    "sesame":    {"kc_ini": 0.35, "kc_mid": 1.10, "kc_end": 0.25, "d_ini": 20, "d_dev": 30, "d_mid": 40, "d_fin": 20},
+    # --- Cereales ---
+    "mais":      {"kc_ini": 0.30, "kc_mid": 1.20, "kc_end": 0.60, "d_ini": 25, "d_dev": 40, "d_mid": 45, "d_fin": 30},
+    "mais doux": {"kc_ini": 0.30, "kc_mid": 1.15, "kc_end": 1.05, "d_ini": 20, "d_dev": 30, "d_mid": 30, "d_fin": 10},
+    "riz":       {"kc_ini": 1.05, "kc_mid": 1.20, "kc_end": 0.75, "d_ini": 30, "d_dev": 30, "d_mid": 60, "d_fin": 30},
+    "sorgho":    {"kc_ini": 0.30, "kc_mid": 1.05, "kc_end": 0.55, "d_ini": 20, "d_dev": 35, "d_mid": 40, "d_fin": 30},
+    "mil":       {"kc_ini": 0.30, "kc_mid": 1.00, "kc_end": 0.30, "d_ini": 15, "d_dev": 25, "d_mid": 40, "d_fin": 25},
+    # --- Racines & tubercules ---
+    "manioc":    {"kc_ini": 0.30, "kc_mid": 0.80, "kc_end": 0.50, "d_ini": 30, "d_dev": 60, "d_mid": 120, "d_fin": 60},
+    "igname":    {"kc_ini": 0.50, "kc_mid": 1.10, "kc_end": 0.95, "d_ini": 30, "d_dev": 60, "d_mid": 120, "d_fin": 40},
+    "patate douce": {"kc_ini": 0.50, "kc_mid": 1.15, "kc_end": 0.65, "d_ini": 20, "d_dev": 30, "d_mid": 60, "d_fin": 30},
+    "pomme de terre": {"kc_ini": 0.50, "kc_mid": 1.15, "kc_end": 0.75, "d_ini": 25, "d_dev": 30, "d_mid": 45, "d_fin": 30},
+    "taro":      {"kc_ini": 0.50, "kc_mid": 1.10, "kc_end": 0.95, "d_ini": 30, "d_dev": 60, "d_mid": 90, "d_fin": 40},
+    "gingembre": {"kc_ini": 0.50, "kc_mid": 1.10, "kc_end": 0.90, "d_ini": 30, "d_dev": 60, "d_mid": 90, "d_fin": 40},
+    # --- Industrielles & perennes (Kc ~ constant) ---
+    "coton":     {"kc_ini": 0.35, "kc_mid": 1.15, "kc_end": 0.70, "d_ini": 30, "d_dev": 50, "d_mid": 55, "d_fin": 45},
+    "canne a sucre": {"kc_ini": 0.40, "kc_mid": 1.25, "kc_end": 0.75, "d_ini": 35, "d_dev": 60, "d_mid": 190, "d_fin": 120},
+    "banane":    {"kc_ini": 0.50, "kc_mid": 1.10, "kc_end": 1.00, "d_ini": 120, "d_dev": 90, "d_mid": 120, "d_fin": 60},
+    "banane plantain": {"kc_ini": 0.50, "kc_mid": 1.10, "kc_end": 1.00, "d_ini": 120, "d_dev": 90, "d_mid": 120, "d_fin": 60},
+    "ananas":    {"kc_ini": 0.50, "kc_mid": 0.30, "kc_end": 0.30, "d_ini": 60, "d_dev": 120, "d_mid": 600, "d_fin": 10},
+    "cacao":     {"kc_ini": 1.00, "kc_mid": 1.05, "kc_end": 1.00, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "cafe":      {"kc_ini": 0.90, "kc_mid": 0.95, "kc_end": 0.95, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "palmier a huile": {"kc_ini": 0.95, "kc_mid": 1.00, "kc_end": 1.00, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "hevea":     {"kc_ini": 0.95, "kc_mid": 1.00, "kc_end": 1.00, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "anacarde":  {"kc_ini": 0.85, "kc_mid": 0.90, "kc_end": 0.90, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "mangue":    {"kc_ini": 0.80, "kc_mid": 0.85, "kc_end": 0.85, "d_ini": 60, "d_dev": 60, "d_mid": 240, "d_fin": 5},
+    "papaye":    {"kc_ini": 0.80, "kc_mid": 1.00, "kc_end": 0.90, "d_ini": 60, "d_dev": 90, "d_mid": 180, "d_fin": 30},
+    "agrumes":   {"kc_ini": 0.70, "kc_mid": 0.65, "kc_end": 0.70, "d_ini": 60, "d_dev": 90, "d_mid": 180, "d_fin": 30},
 }
+
+# Coefficients generiques (toute culture inconnue) : valeurs FAO-56 moyennes d'un
+# legume/culture annuelle. Permet de ne JAMAIS bloquer sur une culture non listee.
+KC_GENERIQUE = {"kc_ini": 0.50, "kc_mid": 1.05, "kc_end": 0.80,
+                "d_ini": 25, "d_dev": 35, "d_mid": 40, "d_fin": 25}
+
+# Synonymes / orthographes courantes -> cle canonique de CULTURES / EXIGENCES.
+ALIAS_CULTURE = {
+    "mais": "mais", "maïs": "mais", "corn": "mais", "mais grain": "mais",
+    "maïs doux": "mais doux", "sweet corn": "mais doux",
+    "piment": "piment", "poivron": "poivron", "pepper": "piment",
+    "haricot": "niebe", "haricots": "niebe", "niebe": "niebe", "niébé": "niebe",
+    "haricot vert": "haricot vert",
+    "arachide": "arachide", "peanut": "arachide", "cacahuete": "arachide",
+    "manioc": "manioc", "cassava": "manioc",
+    "igname": "igname", "yam": "igname",
+    "patate douce": "patate douce", "patate": "patate douce", "sweet potato": "patate douce",
+    "pomme de terre": "pomme de terre", "potato": "pomme de terre",
+    "gombo": "gombo", "okra": "gombo",
+    "aubergine": "aubergine", "aubergine africaine": "aubergine", "gnagnan": "aubergine",
+    "pasteque": "pasteque", "pastèque": "pasteque", "melon d'eau": "pasteque",
+    "banane": "banane", "banane plantain": "banane plantain", "plantain": "banane plantain",
+    "canne": "canne a sucre", "canne a sucre": "canne a sucre", "canne à sucre": "canne a sucre",
+    "palmier": "palmier a huile", "palmier a huile": "palmier a huile", "palmier à huile": "palmier a huile",
+    "cafe": "cafe", "café": "cafe", "cacao": "cacao", "cajou": "anacarde", "anacarde": "anacarde",
+    "orange": "agrumes", "citron": "agrumes", "agrume": "agrumes", "agrumes": "agrumes",
+    "riz": "riz", "sorgho": "sorgho", "mil": "mil", "soja": "soja", "sesame": "sesame", "sésame": "sesame",
+}
+
+
+def _norm_nom(nom):
+    """Minuscule + sans accents, pour comparer les noms de culture."""
+    import unicodedata
+    s = (nom or "").strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s
+
+
+def get_culture(nom):
+    """
+    Renvoie (donnees_kc, nom_canonique, est_generique) pour N'IMPORTE QUELLE culture.
+    - Si la culture est connue (directement ou via un synonyme) -> ses coefficients.
+    - Sinon -> coefficients generiques (jamais de blocage), est_generique=True.
+    """
+    brut = _norm_nom(nom)
+    # resolution via alias (compare aussi la version sans accents des cles d'alias)
+    cle = ALIAS_CULTURE.get(nom.strip().lower()) if nom else None
+    if not cle:
+        for k, v in ALIAS_CULTURE.items():
+            if _norm_nom(k) == brut:
+                cle = v
+                break
+    if not cle:
+        cle = brut
+    if cle in CULTURES:
+        return CULTURES[cle], cle, False
+    return KC_GENERIQUE, (brut or "culture"), True
 
 
 def kc_du_jour(culture, jours_depuis_semis):
     """
     Renvoie (Kc, nom_du_stade) selon le nombre de jours depuis le semis.
     Interpolation lineaire pendant les phases de transition (FAO-56).
+    Accepte n'importe quelle culture (repli generique si inconnue).
     """
-    c = CULTURES[culture]
+    c, _cle, _gen = get_culture(culture)
     d_ini, d_dev, d_mid, d_fin = c["d_ini"], c["d_dev"], c["d_mid"], c["d_fin"]
     kc_ini, kc_mid, kc_end = c["kc_ini"], c["kc_mid"], c["kc_end"]
     j = jours_depuis_semis
@@ -234,18 +398,18 @@ def lire_et0_moyen(et0_img, zone):
     centroide de la zone si necessaire.
     """
     for sc in (1000, 5000, 11132):
-        val = et0_img.reduceRegion(
+        val = lire_cle(et0_img.reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone,
             scale=sc, maxPixels=1e9, bestEffort=True
-        ).get("ET0").getInfo()
+        ), "ET0")
         if val is not None:
             return val
     # Dernier recours : valeur au centre de la parcelle
     centre = zone.centroid(maxError=1)
-    val = et0_img.reduceRegion(
+    val = lire_cle(et0_img.reduceRegion(
         reducer=ee.Reducer.first(), geometry=centre,
         scale=11132, maxPixels=1e9, bestEffort=True
-    ).get("ET0").getInfo()
+    ), "ET0")
     return val
 
 
@@ -256,9 +420,12 @@ def calculer_irrigation():
     if erreur:
         return jsonify({"erreur": erreur}), 400
 
-    culture = (data.get("culture") or "").lower()
-    if culture not in CULTURES:
-        return jsonify({"erreur": "Culture inconnue. Choisis : tomate, concombre, piment, laitue."}), 400
+    culture = (data.get("culture") or "").strip()
+    if not culture:
+        return jsonify({"erreur": "Indique une culture (ex. tomate, mais, riz, arachide...)."}), 400
+    # Toute culture est acceptee : si elle n'est pas dans la table, on utilise des
+    # coefficients FAO-56 generiques (comme l'itineraire technique, aucune restriction).
+    _kcdata, culture_canon, est_generique = get_culture(culture)
 
     date_semis = data.get("date_semis")
     if not date_semis:
@@ -306,9 +473,9 @@ def calculer_irrigation():
                   .filterDate(debut_dt.strftime("%Y-%m-%d"), date_fin)
                   .filterBounds(zone))
         n_pluie = chirps.size().getInfo()
-        pluie_tot = chirps.sum().reduceRegion(
+        pluie_tot = lire_cle(chirps.sum().reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone, scale=5000, maxPixels=1e9, bestEffort=True
-        ).get("precipitation").getInfo() or 0
+        ), "precipitation", 0)
         # moyenne journaliere sur le nombre de jours reels (evite division par 7 fixe)
         pluie_jour = (pluie_tot / n_pluie) if n_pluie and n_pluie > 0 else 0
 
@@ -318,7 +485,9 @@ def calculer_irrigation():
         besoin = max(etc - pluie_eff, 0)
 
         return jsonify({
-            "culture": culture,
+            "culture": culture_canon,
+            "culture_saisie": culture,
+            "coefficients_generiques": est_generique,
             "stade": stade,
             "jours_depuis_semis": jours_semis,
             "kc": round(kc, 2),
@@ -327,7 +496,7 @@ def calculer_irrigation():
             "pluie_mm_j": round(pluie_jour, 2),
             "pluie_efficace_mm_j": round(pluie_eff, 2),
             "besoin_irrigation_mm_j": round(besoin, 2),
-            "message": "Besoin en eau calcule (FAO-56)"
+            "message": ("Besoin en eau calcule (FAO-56)" + (" - coefficients generiques (culture non repertoriee, estimation)" if est_generique else ""))
         })
 
     except Exception as e:
@@ -379,9 +548,9 @@ def carte_irrigation():
         # 5) Pluie efficace (scalaire) -> soustraction
         chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                   .filterDate(et0_debut, date_fin).filterBounds(zone))
-        pluie_tot = chirps.sum().reduceRegion(
+        pluie_tot = lire_cle(chirps.sum().reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone, scale=5000, maxPixels=1e9, bestEffort=True
-        ).get("precipitation").getInfo() or 0
+        ), "precipitation", 0)
         pluie_eff_j = pluie_efficace(pluie_tot / 7.0)
 
         # 6) Besoin pixel = ETc - pluie efficace (mm/j), borne a 0
@@ -423,9 +592,10 @@ def irrigation_evolution():
     if erreur:
         return jsonify({"erreur": erreur}), 400
 
-    culture = (data.get("culture") or "").lower()
-    if culture not in CULTURES:
-        return jsonify({"erreur": "Culture inconnue."}), 400
+    culture = (data.get("culture") or "").strip()
+    if not culture:
+        return jsonify({"erreur": "Indique une culture."}), 400
+    # Toute culture acceptee (repli generique si inconnue).
     date_semis = data.get("date_semis")
     if not date_semis:
         return jsonify({"erreur": "Fournis la date de semis."}), 400
@@ -469,10 +639,10 @@ def irrigation_evolution():
             # Pluie CHIRPS cumulee sur la semaine
             chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                       .filterDate(d1, d2).filterBounds(zone))
-            pluie = chirps.sum().reduceRegion(
+            pluie = lire_cle(chirps.sum().reduceRegion(
                 reducer=ee.Reducer.mean(), geometry=zone,
                 scale=5000, maxPixels=1e9, bestEffort=True
-            ).get("precipitation").getInfo() or 0
+            ), "precipitation", 0)
             pluie_eff = pluie_efficace(pluie)
 
             if etc_hebdo is None:
@@ -532,6 +702,106 @@ EXIGENCES = {
         "mois_semis": [11, 12, 1, 2],
         "note": "Enracinement superficiel, arrosages frequents. Montaison si trop chaud : variete thermotolerante + ombriere."
     },
+    "aubergine": {
+        "t_min": 22, "t_max": 30, "t_critique": 35, "eau_min": 450, "eau_max": 700,
+        "mois_semis": [9, 10, 11, 2, 3],
+        "note": "Aime la chaleur. Billons draines. Sensible aux nematodes : rotation conseillee."
+    },
+    "gombo": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 400, "eau_max": 600,
+        "mois_semis": [3, 4, 5, 6, 9, 10],
+        "note": "Culture rustique de saison chaude. Recolte frequente des capsules jeunes."
+    },
+    "oignon": {
+        "t_min": 15, "t_max": 28, "t_critique": 35, "eau_min": 350, "eau_max": 550,
+        "mois_semis": [10, 11, 12, 1],
+        "note": "Bulbaison favorisee par temps sec. Arreter l'irrigation avant recolte."
+    },
+    "chou": {
+        "t_min": 15, "t_max": 25, "t_critique": 30, "eau_min": 350, "eau_max": 500,
+        "mois_semis": [10, 11, 12, 1],
+        "note": "Prefere la fraicheur. Surveiller chenilles et pucerons. Sol riche en matiere organique."
+    },
+    "carotte": {
+        "t_min": 16, "t_max": 24, "t_critique": 30, "eau_min": 350, "eau_max": 500,
+        "mois_semis": [10, 11, 12, 1],
+        "note": "Sol meuble et profond sans cailloux (racines droites). Semis direct."
+    },
+    "pasteque": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 400, "eau_max": 600,
+        "mois_semis": [11, 12, 1, 2, 3],
+        "note": "Saison chaude et ensoleillee. Reduire l'eau a l'approche de la maturite (sucre)."
+    },
+    "melon": {
+        "t_min": 22, "t_max": 30, "t_critique": 36, "eau_min": 400, "eau_max": 600,
+        "mois_semis": [11, 12, 1, 2],
+        "note": "Chaleur et soleil. Eviter l'exces d'humidite sur feuillage (oidium)."
+    },
+    "mais": {
+        "t_min": 20, "t_max": 32, "t_critique": 38, "eau_min": 450, "eau_max": 700,
+        "mois_semis": [3, 4, 5, 8, 9],
+        "note": "Caler le semis sur l'installation des pluies. Besoin fort en eau a la floraison."
+    },
+    "riz": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 900, "eau_max": 1500,
+        "mois_semis": [4, 5, 6, 7],
+        "note": "Riz irrigue/bas-fond : lame d'eau. Riz pluvial : besoin de pluies regulieres."
+    },
+    "arachide": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 400, "eau_max": 600,
+        "mois_semis": [4, 5, 6, 7],
+        "note": "Sol leger et draine. Peu d'azote (legumineuse). Recolte en sol ressuye."
+    },
+    "niebe": {
+        "t_min": 22, "t_max": 33, "t_critique": 38, "eau_min": 300, "eau_max": 450,
+        "mois_semis": [5, 6, 7, 8, 9],
+        "note": "Legumineuse rustique, tolere la secheresse. Surveiller pucerons et thrips a la floraison."
+    },
+    "soja": {
+        "t_min": 20, "t_max": 30, "t_critique": 35, "eau_min": 450, "eau_max": 700,
+        "mois_semis": [5, 6, 7],
+        "note": "Legumineuse. Inoculation conseillee. Sensible au manque d'eau au remplissage des gousses."
+    },
+    "sorgho": {
+        "t_min": 22, "t_max": 34, "t_critique": 40, "eau_min": 400, "eau_max": 600,
+        "mois_semis": [5, 6, 7],
+        "note": "Tres tolerant a la secheresse. Bien adapte au nord du pays."
+    },
+    "manioc": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 500, "eau_max": 1000,
+        "mois_semis": [3, 4, 5, 9, 10],
+        "note": "Culture rustique de longue duree (8-12 mois). Boutures saines. Tolere les sols pauvres."
+    },
+    "igname": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 600, "eau_max": 1200,
+        "mois_semis": [2, 3, 4, 11, 12],
+        "note": "Longue duree. Buttes profondes. Tuteurage. Demande des sols profonds et meubles."
+    },
+    "patate douce": {
+        "t_min": 20, "t_max": 32, "t_critique": 38, "eau_min": 400, "eau_max": 650,
+        "mois_semis": [3, 4, 5, 9, 10],
+        "note": "Boutures sur billons. Rustique. Reduire l'eau en fin de cycle (tubercules)."
+    },
+    "banane plantain": {
+        "t_min": 22, "t_max": 32, "t_critique": 38, "eau_min": 1200, "eau_max": 1800,
+        "mois_semis": [3, 4, 5, 9, 10],
+        "note": "Perenne exigeante en eau et en matiere organique. Paillage fortement conseille."
+    },
+    "cacao": {
+        "t_min": 21, "t_max": 30, "t_critique": 34, "eau_min": 1200, "eau_max": 2000,
+        "mois_semis": [4, 5, 6, 9, 10],
+        "note": "Perenne d'ombrage. Exige des pluies abondantes et reparties. Zone forestiere."
+    },
+    "cafe": {
+        "t_min": 20, "t_max": 28, "t_critique": 32, "eau_min": 1000, "eau_max": 1800,
+        "mois_semis": [4, 5, 6, 9, 10],
+        "note": "Perenne. Robusta adapte aux zones chaudes. Pluies reparties, ombrage leger."
+    },
+    "anacarde": {
+        "t_min": 22, "t_max": 36, "t_critique": 42, "eau_min": 600, "eau_max": 1200,
+        "mois_semis": [5, 6, 7],
+        "note": "Tres rustique, adapte au nord. Tolere la secheresse une fois installe."
+    },
 }
 
 MOIS_FR = {1:"janvier",2:"fevrier",3:"mars",4:"avril",5:"mai",6:"juin",
@@ -541,17 +811,17 @@ MOIS_FR = {1:"janvier",2:"fevrier",3:"mars",4:"avril",5:"mai",6:"juin",
 def lire_valeur_moyenne(image, zone, bande):
     """Lecture robuste (multi-echelle + centroide) d'une bande d'une image ERA5/CHIRPS."""
     for sc in (1000, 5000, 11132):
-        val = image.reduceRegion(
+        val = lire_cle(image.reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone,
             scale=sc, maxPixels=1e9, bestEffort=True
-        ).get(bande).getInfo()
+        ), bande)
         if val is not None:
             return val
     centre = zone.centroid(maxError=1)
-    return image.reduceRegion(
+    return lire_cle(image.reduceRegion(
         reducer=ee.Reducer.first(), geometry=centre,
         scale=11132, maxPixels=1e9, bestEffort=True
-    ).get(bande).getInfo()
+    ), bande)
 
 
 def evaluer_culture(nom, temp_moy, pluie_cycle, mois):
@@ -563,6 +833,7 @@ def evaluer_culture(nom, temp_moy, pluie_cycle, mois):
     # --- Critere temperature ---
     if temp_moy is None:
         raisons.append("temperature indisponible")
+        score_temp = 1
     elif temp_moy > e["t_critique"]:
         raisons.append(f"temperature trop elevee ({temp_moy:.1f}degC > seuil critique {e['t_critique']}degC)")
         score_temp = 0
@@ -648,10 +919,10 @@ def conseil_plantation():
         dc2 = (ref + timedelta(days=45)).strftime("%Y-%m-%d")
         chirps = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                   .filterDate(dc1, dc2).filterBounds(zone))
-        pluie_cycle = chirps.sum().reduceRegion(
+        pluie_cycle = lire_cle(chirps.sum().reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone,
             scale=5000, maxPixels=1e9, bestEffort=True
-        ).get("precipitation").getInfo()
+        ), "precipitation")
 
         # Evaluer chaque culture
         resultats = [evaluer_culture(nom, temp_moy, pluie_cycle, mois)
@@ -687,21 +958,41 @@ def calculer_ndvi():
     date_debut = data.get("date_debut", "2024-01-01")
     date_fin = data.get("date_fin", "2024-12-31")
     try:
-        col = collection_ndvi(zone, date_debut, date_fin)
+        # Collection robuste : si la fenetre demandee est vide (petite parcelle,
+        # periode courte, nuages), on elargit automatiquement avant d'abandonner.
+        col, info = collection_ndvi_robuste(zone, date_debut, date_fin)
+        if col is None:
+            return jsonify({"erreur": info}), 400
+
         ndvi = col.select("NDVI").median().clip(zone)
         palette = ["#a52a2a", "#d9a441", "#ffff99", "#97c459", "#3b6d11", "#173404"]
         map_id = ndvi.getMapId({"min": 0.0, "max": 0.8, "palette": palette})
         tile_url = map_id["tile_fetcher"].url_format
-        moyenne = ndvi.reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=zone, scale=10, maxPixels=1e9
-        ).get("NDVI").getInfo()
+
+        # Moyenne NDVI : lecture robuste. Sur une parcelle plus petite qu'un pixel,
+        # on reessaie a une echelle plus large puis sur une zone avec marge.
+        moyenne = None
+        for sc in (10, 20, 30):
+            moyenne = lire_cle(ndvi.reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=zone,
+                scale=sc, maxPixels=1e9, bestEffort=True
+            ), "NDVI")
+            if moyenne is not None:
+                break
+        if moyenne is None:
+            moyenne = lire_cle(ndvi.reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=zone_avec_marge(zone, 20),
+                scale=10, maxPixels=1e9, bestEffort=True
+            ), "NDVI")
 
         reponse = {
             "tile_url": tile_url,
             "ndvi_moyen": round(moyenne, 3) if moyenne is not None else None,
-            "message": "NDVI calcule avec succes"
+            "message": "NDVI calcule avec succes",
+            "images_utilisees": info.get("images"),
+            "periode_depuis": info.get("depuis")
         }
-        reponse.update(calculer_stats(ndvi, zone))
+        reponse.update(calculer_stats(ndvi, zone_avec_marge(zone, 20) if reponse["ndvi_moyen"] is None else zone))
         return jsonify(reponse)
     except Exception as e:
         return jsonify({"erreur": str(e)}), 500
@@ -788,10 +1079,10 @@ def anomalie_ndvi():
         tile_url = map_id["tile_fetcher"].url_format
 
         classe = (diff.gte(-SEUIL_ANOMALIE).add(diff.gt(SEUIL_ANOMALIE)).rename("classe"))
-        histo = classe.reduceRegion(
+        histo = lire_cle(classe.reduceRegion(
             reducer=ee.Reducer.frequencyHistogram(),
             geometry=zone, scale=10, maxPixels=1e9, bestEffort=True
-        ).get("classe").getInfo() or {}
+        ), "classe", {}) or {}
 
         n_deg = histo.get("0", 0); n_sta = histo.get("1", 0); n_ame = histo.get("2", 0)
         total = n_deg + n_sta + n_ame
