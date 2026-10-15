@@ -386,7 +386,10 @@ def calcul_et0_gee(zone, date_debut, date_fin):
         et0 = num.divide(den).rename("ET0")
         return et0.copyProperties(img, ["system:time_start"])
 
-    return col.map(et0_image).mean().clip(zone)
+    # On decoupe avec une MARGE de 30 km : ERA5-Land (~11 km) peut masquer les pixels
+    # cotiers (eau) d'une petite parcelle au bord de mer (ex. San-Pedro). Avec la marge,
+    # on garde des pixels terrestres voisins pour lire une ET0 representative.
+    return col.map(et0_image).mean().clip(zone_avec_marge(zone, 30000))
 
 
 
@@ -397,6 +400,7 @@ def lire_et0_moyen(et0_img, zone):
     peut ne rien capter. On essaie plusieurs echelles, puis on retombe sur le
     centroide de la zone si necessaire.
     """
+    # 1) Sur la parcelle elle-meme, a plusieurs echelles.
     for sc in (1000, 5000, 11132):
         val = lire_cle(et0_img.reduceRegion(
             reducer=ee.Reducer.mean(), geometry=zone,
@@ -404,10 +408,19 @@ def lire_et0_moyen(et0_img, zone):
         ), "ET0")
         if val is not None:
             return val
-    # Dernier recours : valeur au centre de la parcelle
+    # 2) Parcelle trop petite ou cotiere (pixels masques) : on moyenne sur un TAMPON
+    #    croissant pour capter les pixels terrestres ERA5 voisins (climat ~identique).
+    for marge in (5000, 15000, 30000):
+        val = lire_cle(et0_img.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone_avec_marge(zone, marge),
+            scale=11132, maxPixels=1e9, bestEffort=True
+        ), "ET0")
+        if val is not None:
+            return val
+    # 3) Dernier recours : moyenne autour du centre de la parcelle.
     centre = zone.centroid(maxError=1)
     val = lire_cle(et0_img.reduceRegion(
-        reducer=ee.Reducer.first(), geometry=centre,
+        reducer=ee.Reducer.mean(), geometry=zone_avec_marge(centre, 15000),
         scale=11132, maxPixels=1e9, bestEffort=True
     ), "ET0")
     return val
@@ -817,9 +830,17 @@ def lire_valeur_moyenne(image, zone, bande):
         ), bande)
         if val is not None:
             return val
+    # Petite parcelle / cotiere : on moyenne sur un tampon croissant (pixels voisins).
+    for marge in (5000, 15000, 30000):
+        val = lire_cle(image.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=zone_avec_marge(zone, marge),
+            scale=11132, maxPixels=1e9, bestEffort=True
+        ), bande)
+        if val is not None:
+            return val
     centre = zone.centroid(maxError=1)
     return lire_cle(image.reduceRegion(
-        reducer=ee.Reducer.first(), geometry=centre,
+        reducer=ee.Reducer.mean(), geometry=zone_avec_marge(centre, 15000),
         scale=11132, maxPixels=1e9, bestEffort=True
     ), bande)
 
