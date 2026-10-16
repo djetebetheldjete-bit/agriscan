@@ -88,9 +88,25 @@ def zone_avec_marge(zone, metres=20):
         return zone
 
 
-def collection_ndvi(zone, date_debut, date_fin, seuil_nuages=20):
-    """Collection Sentinel-2 filtree, avec bande NDVI ajoutee."""
+def masque_nuages_s2(image):
+    """
+    Masque les nuages, ombres de nuages et cirrus PIXEL PAR PIXEL grace a la bande
+    SCL (Scene Classification) de Sentinel-2. CRUCIAL : sans ce masque, un nuage ou
+    un voile fait chuter le NDVI (reflectance elevee partout) et une zone bien verte
+    ressort a tort en ROUGE / NDVI tres faible. On ne garde que les pixels utiles :
+      4=vegetation, 5=sol nu, 6=eau, 7=non classe, 11=neige.
+    On retire : 0=no data, 1=sature, 2=ombre sombre, 3=ombre de nuage,
+      8=nuage (proba moyenne), 9=nuage (proba haute), 10=cirrus.
+    """
+    scl = image.select("SCL")
+    bon = (scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).Or(scl.eq(11)))
+    return image.updateMask(bon)
+
+
+def collection_ndvi(zone, date_debut, date_fin, seuil_nuages=60):
+    """Collection Sentinel-2 filtree + masque nuages par pixel, avec bande NDVI ajoutee."""
     def ajouter_ndvi(image):
+        image = masque_nuages_s2(image)
         ndvi = image.normalizedDifference(["B8", "B4"]).rename("NDVI")
         return image.addBands(ndvi)
     return (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -115,15 +131,14 @@ def collection_ndvi_robuste(zone, date_debut, date_fin):
     except Exception:
         fin_dt = None
 
-    essais = [(date_debut, 20)]
+    # Les nuages etant retires PIXEL PAR PIXEL (masque SCL), on tolere des scenes
+    # assez nuageuses (60 %) : plus d'images = meilleure mediane de pixels clairs.
+    essais = [(date_debut, 60)]
     if fin_dt is not None:
-        for recul in (60, 120):
+        for recul in (90, 180, 365):
             d = (fin_dt - timedelta(days=recul)).strftime("%Y-%m-%d")
-            essais.append((d, 20))
-        for recul in (90, 150):
-            d = (fin_dt - timedelta(days=recul)).strftime("%Y-%m-%d")
-            essais.append((d, 40))
             essais.append((d, 60))
+            essais.append((d, 100))
 
     for d_debut, seuil in essais:
         col = collection_ndvi(zone, d_debut, date_fin, seuil_nuages=seuil)
